@@ -1,0 +1,12 @@
+<Solution>
+    <Folder Name="/src/">
+        <Project Path="src/Kkts.DataAccess/Kkts.DataAccess.csproj" />
+        <Project Path="src/Kkts.DataAccess.Sqlite/Kkts.DataAccess.Sqlite.csproj" />
+    </Folder>
+    <Folder Name="/examples/">
+        <Project Path="examples/EmployeeApp/EmployeeApp.csproj" />
+    </Folder>
+    <Folder Name="/tests/">
+        <Project Path="tests/Kkts.DataAccess.Tests/Kkts.DataAccess.Tests.csproj" />
+    </Folder>
+</Solution>

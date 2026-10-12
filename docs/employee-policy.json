@@ -1,0 +1,96 @@
+{
+  "resource": "Employee",
+  "schemaVersion": "1",
+  "rules": [
+    {
+      "id": "manager-active-department",
+      "resource": "Employee",
+      "action": "Read",
+      "effect": "Allow",
+      "subject": {
+        "roles": [
+          "manager"
+        ],
+        "groups": []
+      },
+      "condition": {
+        "all": [
+          {
+            "field": "DepartmentId",
+            "operator": "eq",
+            "context": "user.departmentId"
+          },
+          {
+            "field": "Status",
+            "operator": "eq",
+            "literal": "Active"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hr-active",
+      "resource": "Employee",
+      "action": "Read",
+      "effect": "Allow",
+      "subject": {
+        "roles": [
+          "hr"
+        ],
+        "groups": []
+      },
+      "condition": {
+        "field": "Status",
+        "operator": "eq",
+        "literal": "Active"
+      }
+    },
+    {
+      "id": "employee-self",
+      "resource": "Employee",
+      "action": "Read",
+      "effect": "Allow",
+      "subject": {
+        "roles": [
+          "employee"
+        ],
+        "groups": []
+      },
+      "condition": {
+        "field": "Id",
+        "operator": "eq",
+        "context": "user.id"
+      }
+    }
+  ],
+  "fieldEntries": [
+    {
+      "id": "public-fields",
+      "resource": "Employee",
+      "action": "Read",
+      "effect": "Allow",
+      "subject": {
+        "roles": [
+          "manager",
+          "hr",
+          "employee"
+        ],
+        "groups": []
+      },
+      "fields": {
+        "Select": [
+          "Id",
+          "Name",
+          "Email"
+        ],
+        "Filter": [
+          "DepartmentId",
+          "Status"
+        ],
+        "Sort": [
+          "Name"
+        ]
+      }
+    }
+  ]
+}
