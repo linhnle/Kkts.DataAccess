@@ -1,10 +1,52 @@
 # Authorized reads
 
-AuthorizedReads<T> accepts a schema, compiler, policy store, EF Core database factory, server-derived context factory and administrative scope. ListAsync, CountAsync, DetailAsync and ExportAsync own policy capture/validation/execution/mapping. ReadRequest contains selection, structured filter, sort, offset/limit and action, with no executable expression or authorization identity. Results expose materialized JSON DTOs and counts/version ids.
+`AuthorizedReads<T>` accepts a schema, compiler, policy store, EF Core database factory, server-derived context factory and administrative scope. `ListAsync`, `CountAsync`, `DetailAsync` and `ExportAsync` own policy capture/validation/execution/mapping. Each operation captures once and binds internally to Read; clients cannot supply an action, executable expression, or authorization identity. Results contain materialized JSON DTOs and captured-policy metadata.
+
+| Operation | Request | Supported inputs |
+| --- | --- | --- |
+| List | `ListReadRequest` | Selection, Filter, Sort, Offset (default 0), Limit (default 50), IncludeTotal (default true), IncludeHasMore (default false) |
+| Cursor list | `CursorListReadRequest` | Selection, Filter, Sort, Limit (default 50), ContinuationToken, IncludeTotal (default true), IncludeHasMore (default false) |
+| Count | `CountReadRequest` | Filter only |
+| Detail | `DetailReadRequest` | Required JSON scalar Key, Selection, Filter |
+| Export | `ExportReadRequest` | Selection, Filter, Sort |
+
+Each request uses type-local strict JSON deserialization: unknown members, action/identity overrides, and operation-inapplicable inputs are rejected. Count rejects selection/sort/pagination; detail rejects sort/pagination; export rejects client pagination/batch overrides. Count/detail/export also reject list metadata flags. Those flags accept only JSON booleans, not null, numbers, or strings. The example returns HTTP 400 for malformed payloads and HTTP 403 for forbidden query fields.
 
 Omitted selection uses effective Select fields; [] yields empty DTOs. Explicit unknown/forbidden fields fail. Filtering/sorting require independent grants. Every nested client leaf is checked; context references and navigation/property paths absent from the schema are forbidden. Writes/aggregation and non-Read actions are unsupported even with permission metadata.
 
-Validation precedes opening the entity database. Mandatory/Allow/Deny predicates precede client filters. Counts run before pagination. Detail adds the host stable-key predicate without granting client privileges; excluded/nonexistent records both produce null (404 in the example). Ordering appends the host-declared unique stable key; hosts must enforce uniqueness. Invalid/missing keys prevent registration.
+Validation precedes opening the entity database and checks only applicable inputs. Count needs no Select or Sort grants; only list validates client pagination. Mandatory/Allow/Deny predicates precede client filters. Lists return an exact total before pagination only when requested; standalone count returns `Task<ReadCount>` with exact `Total` and the operation's captured `PolicyVersion`. Detail adds the host stable-key predicate without requiring a client Filter grant, but explicit client key filters still require that grant. Missing, null, or incompatible detail keys fail before entity access; excluded/nonexistent records both produce null (404 in the example). Ordering appends the host-declared unique stable key; hosts must enforce uniqueness. Invalid/missing stable-key registrations fail.
+
+## Optional list metadata and versioned counts
+
+`ReadPage` and `CursorReadPage` expose nullable `Total` and `HasMore`.
+Unrequested metadata is explicitly JSON null, even with ignore-null/default
+serializer options. An exact total of zero and a requested false has-more are
+values, not missing metadata. Defaults retain exact-total behavior.
+
+| IncludeTotal | IncludeHasMore | Count calls | Offset fetch bound | Total | HasMore |
+| --- | --- | --- | --- | --- | --- |
+| false | false | 0 | Limit | null | null |
+| true | false | 1 | Limit | exact | null |
+| false | true | 0 | Limit + 1 | null | observed boolean |
+| true | true | 1 | Limit + 1 | exact | observed boolean |
+
+Has-more is observed from the one extra authorized row, never inferred from
+total arithmetic or a separate existence query. Lookahead is trimmed before DTO
+mapping; returned rows never exceed the host page limit. An unrepresentable
+lookahead bound fails before entity access. Disabled totals execute no count,
+including when has-more is requested. Enabled count failures propagate.
+
+```csharp
+var page = await reads.ListAsync(new ListReadRequest(
+    Selection: ["Name"], Limit: 20, IncludeTotal: false, IncludeHasMore: true));
+var count = await reads.CountAsync(new CountReadRequest(Filter: filter));
+long exactTotal = count.Total; // Not the former bare long response.
+long capturedVersion = count.PolicyVersion;
+```
+
+The count endpoint now returns `{"policyVersion":1,"total":2}`, not `2`.
+Totals and page observations are independent database statements, not a snapshot;
+they can disagree under concurrent changes without either being fabricated.
 
 `AuthorizedReadRepository<T>` resolves each `SortField` by its exact public alias
 and checks its effective Sort grant before opening an entity session. It supplies
@@ -13,15 +55,107 @@ registered property bindings and directions through the unchanged
 Kkts.Expressions 3.1.0 structured `OrderByInfo` ordering to the authorized query
 before pagination, preserving multi-key order and directions. Repeated sort keys
 remain valid; the stable key is appended only when not explicitly present and
-does not acquire output, Filter, or Sort privileges. Custom adapters and existing
-repository constructors remain unchanged; clients still send `SortField`, not
+does not acquire output, Filter, or Sort privileges. Existing constructor call patterns remain supported, but custom retrieval
+adapters must supply projected capabilities or explicitly allow entity
+materialization; clients still send `SortField`, not
 raw properties, ordering strings, or executable expressions.
 
-ReadLimits defaults: max page 200, max offset 1,000,000, export batch 100. Export validates requests but covers all matching rows from offset zero and retains one policy/version across bounded batches. Cancellation flows through capture and queries.
+ReadLimits defaults: max page 200, max offset 1,000,000, export batch 100. Export validates selection/filter/sort, covers all matching rows from the beginning using private keyset boundaries, and retains one policy/version across host-bounded batches. Count/detail/export have no synthetic default list limit, so a smaller host page maximum does not block them (the configured export batch must still fit that maximum). Cancellation flows through capture and queries.
 
-The shared repository supports SQLite, SQL Server and MySQL entity adapters with SQLite policy storage; see [provider support](providers.md). The SQLite provider baseline is EF Core 10.0.12. Translation/database errors propagate with no unrestricted or local-authorization fallback. Provider restrictions (including some decimal/DateTimeOffset ordering) fail explicitly. Hidden columns can be materialized inside the trusted facade; Phase 1 does not promise column projection. Kkts.Dynamic maps only permitted scalar public bindings in OneWayToDto mode, then serializes before returning results.
+## Breaking request migration
 
-Counts/pages are separate database statements; export batches hold no transaction-wide entity snapshot. Concurrent entity changes may shift offsets or totals. Stable ordering and captured authorization do not guarantee data snapshot consistency.
+The shared `ReadRequest` and old method overloads are removed before release. Constructors and trusted adapter/session methods are unchanged. List metadata is now nullable and standalone count returns `ReadCount`; detail/export results are unchanged. Replace shared requests at each call site:
+
+```csharp
+await reads.ListAsync(new ListReadRequest(Selection: ["Name"], Limit: 20));
+await reads.CountAsync(new CountReadRequest(Filter: filter)); // No selection/sort/limit.
+await reads.DetailAsync(new DetailReadRequest(
+    JsonSerializer.SerializeToElement(id), Selection: ["Name"], Filter: filter));
+await foreach (var batch in reads.ExportAsync(
+    new ExportReadRequest(Selection: ["Name"], Filter: filter, Sort: [new("Name")])))
+{
+    // Consume permitted JSON records.
+}
+```
+
+Detail's key moves from the separate method argument into `DetailReadRequest.Key`.
+Remove old `action` members from every payload and list-only options from count,
+detail, and export; there are no compatibility aliases that ignore them.
+
+The shared repository supports SQLite, SQL Server and MySQL entity adapters with SQLite policy storage; see [provider support](providers.md). The SQLite provider baseline is EF Core 10.0.12. Translation/database errors propagate with no unrestricted or local-authorization fallback. Provider restrictions (including some decimal/DateTimeOffset ordering) fail explicitly. Retrieval requires scalar database projection by default: only selected mapped values enter output buffers, plus minimal cursor/export continuation values or a constant marker for empty nonseek output. Kkts.Dynamic-generated DTO shapes map those checked scalars without constructing entities or evaluating entity getters.
+
+Core and SQLite facade append matching host-only `ReadProjectionMode.Required`
+defaults. Existing construction syntax remains usable with supplied EF adapters.
+Custom adapters must implement projected page/single and projected seek as
+applicable, or explicitly choose `AllowEntityMaterialization`. Compatibility uses
+entity retrieval only when the relevant projected capability is absent; a
+projected failure never retries entity loading. Standalone count remains an
+aggregate and needs no projected capability. See [adapter migration](repositories.md).
+
+Counts/pages are separate database statements; export batches hold no transaction-wide entity snapshot. Concurrent entity changes may shift offset pages or totals. Keyset traversal avoids position shifts before fixed boundaries, but changes to sort values or authorized membership can still cause gaps/repeats. Stable ordering and captured authorization do not guarantee data snapshot consistency.
+
+## Forward cursors
+
+`CursorListReadRequest` accepts Selection/Filter/Sort, Limit (default fifty), and
+an optional ContinuationToken and independent IncludeTotal/IncludeHasMore flags;
+strict JSON rejects offset, action, identity, and
+unknown inputs. `ListCursorAsync` returns `CursorReadPage` with PolicyVersion,
+nullable Total for the authorized query **before** the boundary, permitted Records,
+nullable HasMore, and nullable NextContinuationToken. Total defaults on and
+has-more defaults off, matching offset metadata.
+Cursor pagination always requests bounded Limit-plus-one lookahead, trims it
+before mapping, and uses the last **returned** row as the next boundary. Empty,
+short, or final pages have no next token; empty selection still produces `{}`.
+Cursor fetches Limit + 1 in every metadata combination because token production
+requires lookahead. Requested HasMore is true exactly when a next token is
+produced; no second lookahead query is issued. Disabling total skips count only.
+Both metadata flags may change on resume without invalidating a token; selection,
+filter, sort, limit, authorization and host binding compatibility still apply.
+
+Configure `CursorReadConfiguration` with an established authenticated-encryption
+protector, a server-derived authenticated subject function, and an opaque dataset
+label. Do not use a connection string as the label. The optional
+[Data Protection integration](../src/Kkts.DataAccess.DataProtection/README.md)
+provides protocol-purpose isolation and persistent-key continuity.
+
+```csharp
+var page = await reads.ListCursorAsync(new CursorListReadRequest(
+    Selection: ["Name"], Sort: [new("Name")], Limit: 20));
+if (page.NextContinuationToken is { } next)
+{
+    page = await reads.ListCursorAsync(new CursorListReadRequest(
+        Selection: ["Name"], Sort: [new("Name")], Limit: 20,
+        ContinuationToken: next, IncludeTotal: false, IncludeHasMore: true));
+}
+```
+
+Keep the effective query/selection/order/limit, current policy, authenticated
+subject/context and host dataset/schema bindings compatible on resume. Every
+request recaptures current authorization; tokens do not grant permission or load
+historic policies. A policy-version mismatch requires restarting without a token.
+Rollback to the identical immutable version can make an otherwise unexpired
+compatible token usable again; intervening publications are not an epoch check.
+Malformed, expired, oversized, tampered, wrong-purpose or incompatible tokens fail
+generically before entity access. No silent restart is performed.
+
+Defaults are a fifteen-minute **non-sliding** traversal lifetime and 16-KiB encoded
+token limit with a bounded decrypted payload. Hidden sort/stable-key values remain
+internal or encrypted and never become DTO fields or client Filter permissions.
+Projected seek obtains these values as minimal trusted sidecars; ordinary hidden
+WHERE/ORDER BY dependencies are not selected solely for query evaluation. Sidecars
+are separately validated and excluded from public JSON. Overlapping selected and
+continuation properties share physical retrieval slots. Tokens use the unchanged
+encrypted envelope and active-policy/version compatibility strategy.
+Never log tokens, keys or context values. Hosts own persistent/shared key storage,
+application isolation, at-rest protection and rotation; retain decryptable keys
+through token lifetime for restart continuity. Change dataset identity when
+routing, mappings, collation or seek semantics change.
+
+Exports use captured policy/context and private typed boundaries, not public
+resume tokens. They require seek-capable adapters and supported orderings but no
+protector; unsupported seek cannot fall back to offsets. Saved boundaries survive
+deletion of the boundary row. Inserts after a boundary can appear; neither cursor
+pages nor exports promise a snapshot or exactly-once delivery for changing rows.
 
 ## DTO shape reuse
 
@@ -31,6 +165,11 @@ schema resource/version, and the exact ordered public-to-property bindings.
 Equivalent shapes reuse a built type; different selection orders or property
 bindings do not collide. Hits do not change FIFO insertion order. After eviction,
 a shape can be built again.
+
+Entity mapping and checked scalar mapping use the same generated DTO shape and
+shape-local ordered setter metadata; there is no second projection/serializer
+cache. Cache identity is independent of host materialization mode, policy and
+caller. Both paths preserve the same alias/order/scalar/null JSON behavior.
 
 Only mapping machinery is cached, never entities, grants, caller context, or
 authorization decisions. Each request still captures and validates its policy
@@ -86,4 +225,4 @@ conditions can change the results. The cache substantially reduced warm time
 and allocations in both measured batch sizes; cold misses still pay type emission
 and metadata initialization costs.
 
-HTTP calls: GET /employees and /employees/{id}; POST /employees/list, /employees/count, /employees/export. POST requires an authenticated cookie and a current antiforgery token in RequestVerificationToken; obtain a fresh token from /login after sign-in. Example JSON: {"selection":["Name","Email"],"sort":[{"field":"Name"}],"limit":20}. Export returns newline-delimited DTO JSON. ReadTests and the HTTP acceptance script exercise these operations. Hosts must route every supported data endpoint through the facade.
+HTTP calls: GET /employees and /employees/{id}; POST /employees/list, /employees/cursor, /employees/count, /employees/export. POST requires an authenticated cookie and a current antiforgery token in RequestVerificationToken; obtain a fresh token from /login after sign-in. List JSON: `{"selection":["Name","Email"],"sort":[{"field":"Name"}],"limit":20}`. Unfiltered count JSON: `{}`; filtered count: `{"filter":{"field":"Status","operator":"eq","literal":"Active"}}`. Export JSON: `{"selection":["Name","Email"],"sort":[{"field":"Name"}]}` without pagination; it returns newline-delimited DTO JSON. GET detail constructs its request from the route id. ReadTests and the HTTP acceptance script exercise these operations. Hosts must route every supported data endpoint through the facade.

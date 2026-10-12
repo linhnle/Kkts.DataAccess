@@ -15,9 +15,68 @@ The designer edits nested typed conditions and independent field entries. Save u
 
 Default database: `employee.db`. Set `Database='Data Source=/absolute/path/example.db'` to isolate a clean walkthrough. For HTTP acceptance, start a fresh database on port 5189 and run `python3 scripts/example_acceptance.py` from the repository root. HTTP tests do not replace browser interaction checks.
 
+Read inputs are operation-specific: list accepts selection/filter/sort/offset/limit,
+count accepts only filter (`{}` for an unfiltered count), detail carries its key
+plus selection/filter, and export accepts selection/filter/sort with host-controlled
+batching. Unknown members, action/identity overrides, and inapplicable options
+are rejected rather than ignored. The shared `ReadRequest` and old detail overload
+are removed in this pre-release breaking change. Constructors and trusted adapters
+remain unchanged; list metadata is nullable and standalone count now returns
+`{"policyVersion":1,"total":2}` rather than a number. Numeric consumers use
+`ReadCount.Total`. See the [migration examples](docs/reads.md#breaking-request-migration).
+
+Offset and cursor lists accept independent `includeTotal` (default true) and
+`includeHasMore` (default false). Disabled metadata is explicit null. Disabling
+total avoids the count query; requested has-more observes an extra authorized row,
+not total arithmetic. For example,
+`{"selection":["Name"],"limit":20,"includeTotal":false,"includeHasMore":true}`.
+Count/detail/export reject these list-only flags. Separate count/page statements
+do not promise a snapshot.
+
+Forward cursor lists coexist with offsets at `POST /employees/cursor`. Supply
+selection/filter/sort/limit and pass the opaque `nextContinuationToken` on the next
+matching request; each page reports an exact authorized total only when requested.
+Cursor lookahead remains mandatory for next-token generation, and either metadata
+flag may change on resume without altering row-query compatibility. Tokens are
+encrypted and bound to fresh authorization, the authenticated subject/context,
+query, schema, policy version and dataset. Expiry/mismatch requires restart, not
+historic-policy replay. Never log tokens or trusted boundary/context values.
+
+The example registers the optional Data Protection integration once. `CursorKeys`
+selects a host-managed persistent key directory (Development default:
+`examples/EmployeeApp/.cursor-keys/`); `CursorApplication` selects application
+isolation, and `CursorDataset` supplies an opaque dataset label (default includes
+the synthetic provider identity). Use persistent/shared keys and at-rest protection
+for deployed hosts, retain decryptable keys through token lifetime, and change
+the dataset label when routing, mappings, collation or seek semantics change.
+Defaults are a fifteen-minute non-sliding lifetime and 16-KiB encoded token limit.
+See [cursor setup](docs/reads.md#forward-cursors) and the
+[protection package](src/Kkts.DataAccess.DataProtection/README.md).
+
+Retrieval requires database scalar projection by default; EmployeeApp explicitly
+uses `ReadProjectionMode.Required`. Custom adapters implement
+`IEntityProjectedReadSession<T>` for offset/detail and
+`IEntityProjectedSeekReadSession<T>` for cursor/export. Projected seek need not
+implement full-entity seek. Hosts can deliberately opt into
+`AllowEntityMaterialization` for missing capabilities; capable adapters still
+project and projection failures never retry entity loading. Standalone count
+needs no projected capability. See [adapter migration](docs/repositories.md).
+
+Export uses private keyset boundaries and projected seek. Exports
+retain one captured policy/context, need no public-token configuration, expose no
+resume token, and cannot fall back to offsets. Keyset traversal is not a snapshot
+or a guarantee against changes to sort values.
+
 [Policy contract](docs/policies.md), [Employee policy](docs/employee-policy.json), [Lifecycle](docs/lifecycle.md), [Reads](docs/reads.md), [Dependencies](docs/dependencies.md), and [Acceptance results](docs/acceptance.md), [Repositories](docs/repositories.md), and [Entity providers](docs/providers.md).
 
-Phase 1 supports reads only. Writes/projection are Phase 2; record-dependent fields, masking, relationships and aggregation are Phase 3. Hidden columns may be materialized internally. Provider failures abort without unrestricted/local fallback. Stable ordering does not provide a data snapshot across batches.
+This release supports reads and mapped scalar database projection. Writes,
+record-dependent fields, masking, relationships and aggregation remain deferred.
+Ordinary hidden predicate/order columns stay out of reader values. Cursor/export
+may retrieve minimal trusted continuation sidecars, never DTO properties, with
+public token boundaries encrypted; empty nonseek output uses a constant marker.
+Explicit compatibility may materialize hidden entity data. Provider failures
+abort without unrestricted/local/entity-loading retries. Stable ordering and
+projection do not provide a data snapshot across batches.
 
 Package consumption check:
 

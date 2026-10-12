@@ -67,11 +67,20 @@ internal sealed class DtoShapeKey : IEquatable<DtoShapeKey>
             })
         );
         assembly.Build();
-        return new(shape.GetBuiltType());
+        var type = shape.GetBuiltType();
+        return new(
+            type,
+            bindings
+                .Select(binding =>
+                    type.GetProperty(binding.PublicName)
+                    ?? throw new InvalidOperationException("Generated DTO property is missing.")
+                )
+                .ToArray()
+        );
     }
 }
 
-internal sealed class DtoShape(Type type)
+internal sealed class DtoShape(Type type, PropertyInfo[] setters)
 {
     internal Type Type { get; } = type;
 
@@ -87,6 +96,17 @@ internal sealed class DtoShape(Type type)
             Activator.CreateInstance(Type)
             ?? throw new InvalidOperationException($"Cannot construct DTO type '{Type}'.");
         Mapper.MapFromEntityToDto(dto, entity);
+        return JsonSerializer.SerializeToElement(dto, Type, Options);
+    }
+
+    internal JsonElement MapValues(IReadOnlyList<object?> values)
+    {
+        ProjectedReadRow.ValidateValues(values, setters);
+        var dto =
+            Activator.CreateInstance(Type)
+            ?? throw new InvalidOperationException($"Cannot construct DTO type '{Type}'.");
+        for (var i = 0; i < setters.Length; i++)
+            setters[i].SetValue(dto, values[i]);
         return JsonSerializer.SerializeToElement(dto, Type, Options);
     }
 }

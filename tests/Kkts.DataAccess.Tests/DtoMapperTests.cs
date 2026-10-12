@@ -108,10 +108,20 @@ public class DtoMapperTests
                 [],
             }
         )
+        {
             Assert.Equal(
                 MapUncached(schema, rows, selection).Select(r => r.GetRawText()),
                 DtoMapper.Map(schema, rows, selection).Select(r => r.GetRawText())
             );
+            var projected = rows.Select(row => new ProjectedReadRow(
+                    selection.Select(name => schema.Resolve(name).Property.GetValue(row))
+                ))
+                .ToArray();
+            Assert.Equal(
+                DtoMapper.Map(schema, rows, selection).Select(r => r.GetRawText()),
+                DtoMapper.MapValues(schema, projected, selection).Select(r => r.GetRawText())
+            );
+        }
         Assert.Equal(
             new[] { "displayName", "id" },
             DtoMapper
@@ -166,6 +176,10 @@ public class DtoMapperTests
         Assert.Equal(
             MapUncached(schema, rows, ["value"])[0].GetRawText(),
             DtoMapper.Map(schema, rows, ["value"])[0].GetRawText()
+        );
+        Assert.Equal(
+            DtoMapper.Map(schema, rows, ["value"])[0].GetRawText(),
+            DtoMapper.MapValues(schema, [new ProjectedReadRow([value])], ["value"])[0].GetRawText()
         );
     }
 

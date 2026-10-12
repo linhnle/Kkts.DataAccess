@@ -51,6 +51,7 @@ public class DtoShapeCacheTests
         shape.Map(new DtoMapperTests.Row { Id = 1 });
         var metadata = shape.Options.GetTypeInfo(shape.Type);
         shape.Map(new DtoMapperTests.Row { Id = 2 });
+        Assert.Equal("{\"id\":3}", shape.MapValues([3]).GetRawText());
         Assert.True(shape.Options.IsReadOnly);
         Assert.Same(metadata, shape.Options.GetTypeInfo(shape.Type));
         Assert.NotSame(metadata, JsonSerializerOptions.Default.GetTypeInfo(shape.Type));
@@ -235,7 +236,9 @@ public class DtoShapeCacheTests
                         var shape = cache.GetOrBuild(Key());
                         return (
                             shape,
-                            record: shape.Map(new DtoMapperTests.Row { Id = i, Name = "Name" + i })
+                            record: i % 2 == 0
+                                ? shape.Map(new DtoMapperTests.Row { Id = i, Name = "Name" + i })
+                                : shape.MapValues([i, "Name" + i])
                         );
                     },
                     CancellationToken.None,
@@ -296,6 +299,12 @@ public class DtoShapeCacheTests
             "{}",
             DtoMapper.Map(schema, new[] { new DtoMapperTests.Row() }, [])[0].GetRawText()
         );
+        Assert.Equal(builds, DtoMapper.Cache.BuildCount);
+        Assert.Equal(
+            "{}",
+            DtoMapper.MapValues(schema, [new ProjectedReadRow([])], [])[0].GetRawText()
+        );
+        DtoMapper.MapValues(schema, [new ProjectedReadRow([2])], ["id"]);
         Assert.Equal(builds, DtoMapper.Cache.BuildCount);
         Assert.Throws<AuthorizationException>(() =>
             DtoMapper.Map(schema, Array.Empty<DtoMapperTests.Row>(), ["id", "unknown"])

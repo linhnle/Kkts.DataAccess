@@ -1,10 +1,9 @@
-using System.Text.Json;
 using Kkts.DataAccess.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
 namespace Kkts.DataAccess.Sqlite;
 
-/// <summary>Source-compatible SQLite facade delegating to the provider-neutral repository.</summary>
+/// <summary>SQLite facade with operation-specific inputs delegating to the shared repository.</summary>
 public sealed class AuthorizedReads<T> : IAuthorizedReadRepository<T>
     where T : class
 {
@@ -17,7 +16,9 @@ public sealed class AuthorizedReads<T> : IAuthorizedReadRepository<T>
         Func<DbContext> database,
         Func<TrustedContext> context,
         string scope,
-        ReadLimits? limits = null
+        ReadLimits? limits = null,
+        CursorReadConfiguration? cursor = null,
+        ReadProjectionMode projectionMode = ReadProjectionMode.Required
     )
     {
         repository = new(
@@ -27,26 +28,34 @@ public sealed class AuthorizedReads<T> : IAuthorizedReadRepository<T>
             new EfEntityReadAdapter<T>(database, "Microsoft.EntityFrameworkCore.Sqlite"),
             context,
             scope,
-            limits
+            limits,
+            cursor,
+            projectionMode
         );
     }
 
     public Task<ReadPage> ListAsync(
-        ReadRequest request,
+        ListReadRequest request,
         CancellationToken cancellation = default
     ) => repository.ListAsync(request, cancellation);
 
-    public Task<long> CountAsync(ReadRequest request, CancellationToken cancellation = default) =>
-        repository.CountAsync(request, cancellation);
+    public Task<ReadCount> CountAsync(
+        CountReadRequest request,
+        CancellationToken cancellation = default
+    ) => repository.CountAsync(request, cancellation);
+
+    public Task<CursorReadPage> ListCursorAsync(
+        CursorListReadRequest request,
+        CancellationToken cancellation = default
+    ) => repository.ListCursorAsync(request, cancellation);
 
     public Task<ReadDetail> DetailAsync(
-        JsonElement key,
-        ReadRequest request,
+        DetailReadRequest request,
         CancellationToken cancellation = default
-    ) => repository.DetailAsync(key, request, cancellation);
+    ) => repository.DetailAsync(request, cancellation);
 
     public IAsyncEnumerable<ExportBatch> ExportAsync(
-        ReadRequest request,
+        ExportReadRequest request,
         CancellationToken cancellation = default
     ) => repository.ExportAsync(request, cancellation);
 }

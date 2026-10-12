@@ -1,5 +1,6 @@
 <Solution>
     <Folder Name="/src/">
+        <Project Path="src/Kkts.DataAccess.DataProtection/Kkts.DataAccess.DataProtection.csproj" />
         <Project Path="src/Kkts.DataAccess.SqlServer/Kkts.DataAccess.SqlServer.csproj" />
         <Project Path="src/Kkts.DataAccess.MySql/Kkts.DataAccess.MySql.csproj" />
         <Project Path="src/Kkts.DataAccess.EntityFrameworkCore/Kkts.DataAccess.EntityFrameworkCore.csproj" />

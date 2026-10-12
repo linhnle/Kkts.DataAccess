@@ -24,6 +24,17 @@ The DTO cache retains built types, not builders or `Class` wrappers; see
 
 SQLite provider: Microsoft.EntityFrameworkCore.Sqlite 10.0.12. Tests: Microsoft.NET.Test.Sdk 17.14.1, xunit 2.9.3, xunit.runner.visualstudio 3.1.4. Exact transitive versions are recorded in checked-in package lock files.
 
+`Kkts.DataAccess.DataProtection` optionally references
+Microsoft.AspNetCore.DataProtection.Extensions 10.0.12; core still has no ASP.NET
+reference. Its protocol-specific protector provides authenticated encryption.
+Hosts own persistent/shared keys, at-rest protection, application isolation and
+rotation; see its [key-management documentation](../src/Kkts.DataAccess.DataProtection/README.md).
+Seek ordering deliberately uses provider-translatable conditional null ranks and
+lexicographic comparisons over validated mapped properties. Unlike unchanged
+offset ordering, these expressions need explicit null placement and boundary
+semantics; they cannot be delegated to the property-name-only ordering helper.
+No upstream dependency is changed or authorization evaluated locally.
+
 Run `dotnet restore Kkts.DataAccess.slnx --locked-mode`, `dotnet build Kkts.DataAccess.slnx --no-restore`, then run the real-provider test command from [provider setup](providers.md). For SQLite/core-only checks use `dotnet test Kkts.DataAccess.slnx --no-build --filter 'Provider!=SqlServer&Provider!=MySql'`; report the remote suites as not run.
 
 Expression-query integration acceptance: locked solution restore and build passed with zero warnings/errors; SQLite/core passed 75 tests with one opt-in performance measurement skipped, and real SQL Server/MySQL passed all 14 tests. Formatting and strict OpenSpec validation passed. See [repository acceptance](repository-acceptance.md#expression-query-integration) for commands, null/ordering parity, production dependency inspection, and current evidence. Earlier browser/package checks remain in [Phase 1 acceptance](acceptance.md); they were not rerun for this integration.

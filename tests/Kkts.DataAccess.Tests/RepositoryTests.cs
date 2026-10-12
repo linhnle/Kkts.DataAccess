@@ -1,5 +1,7 @@
 using System.Text.Json;
+using Kkts.DataAccess.DataProtection;
 using Kkts.DataAccess.EntityFrameworkCore;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 using Employee = Kkts.DataAccess.Tests.CompilerTests.Employee;
@@ -10,6 +12,8 @@ public class RepositoryTests
 {
     sealed class Source : IActivePolicySource
     {
+        public int Captures;
+        public Action? OnCapture;
         public CapturedPolicy Current = CompilerTests.Capture(
             CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow))
         );
@@ -21,6 +25,8 @@ public class RepositoryTests
         )
         {
             cancellation.ThrowIfCancellationRequested();
+            Captures++;
+            OnCapture?.Invoke();
             return Task.FromResult(Current);
         }
     }
@@ -29,6 +35,26 @@ public class RepositoryTests
     {
         public int Opened,
             Disposed;
+        public int CountCalls,
+            PageCalls,
+            SeekCalls,
+            SingleCalls;
+        public List<int> SeekLimits = [];
+        public List<int> PageLimits = [];
+        public List<int> PageOffsets = [];
+        public bool FailCount;
+        public long? CountOverride;
+        public Action? OnCount;
+        public bool SupportsProjection;
+        public bool SupportsProjectedSeek;
+        public int ProjectedPageCalls,
+            ProjectedSingleCalls,
+            ProjectedSeekCalls;
+        public Func<
+            IReadOnlyList<ProjectedReadRow>,
+            IReadOnlyList<ProjectedReadRow>
+        >? ProjectedRows;
+        public bool SupportsSeek = true;
         public bool Fail;
         public Employee[] Rows =
         [
@@ -58,12 +84,138 @@ public class RepositoryTests
         {
             cancellation.ThrowIfCancellationRequested();
             Opened++;
-            return ValueTask.FromResult<IEntityReadSession<Employee>>(new Session(this));
+            var session = new Session(this);
+            if (SupportsProjectedSeek)
+                return ValueTask.FromResult<IEntityReadSession<Employee>>(
+                    new ProjectedSeekSession(this, session)
+                );
+            if (SupportsProjection)
+                return ValueTask.FromResult<IEntityReadSession<Employee>>(
+                    SupportsSeek
+                        ? new ProjectedWithEntitySeekSession(this, session)
+                        : new ProjectedSession(this, session)
+                );
+            return ValueTask.FromResult<IEntityReadSession<Employee>>(
+                SupportsSeek ? session : new EntityOnlySession(session)
+            );
         }
 
-        sealed class Session(RecordingAdapter owner) : IEntityReadSession<Employee>
+        class ProjectedSession(RecordingAdapter owner, Session session)
+            : IEntityProjectedReadSession<Employee>
         {
-            IEnumerable<Employee> Query(EntityReadPlan<Employee> plan)
+            protected RecordingAdapter Owner => owner;
+            protected Session EntitySession => session;
+
+            protected IReadOnlyList<ProjectedReadRow> Project(
+                IEnumerable<Employee> entities,
+                EntityReadPlan<Employee> plan,
+                EntitySeekPlan<Employee>? seek = null
+            )
+            {
+                var rows = entities
+                    .Select(entity => new ProjectedReadRow(
+                        plan.OutputBindings.Select(binding => binding.Property.GetValue(entity)),
+                        seek?.ContinuationBindings.Select(property => property.GetValue(entity))
+                    ))
+                    .ToArray();
+                return owner.ProjectedRows?.Invoke(rows) ?? rows;
+            }
+
+            public Task<IReadOnlyList<ProjectedReadRow>> PageProjectedAsync(
+                EntityReadPlan<Employee> plan,
+                int offset,
+                int limit,
+                CancellationToken cancellation
+            )
+            {
+                owner.ProjectedPageCalls++;
+                owner.PageLimits.Add(limit);
+                owner.PageOffsets.Add(offset);
+                return Task.FromResult(Project(session.Order(plan).Skip(offset).Take(limit), plan));
+            }
+
+            public Task<ProjectedReadRow?> SingleProjectedAsync(
+                EntityReadPlan<Employee> plan,
+                CancellationToken cancellation
+            )
+            {
+                owner.ProjectedSingleCalls++;
+                return Task.FromResult(Project(session.Query(plan), plan).SingleOrDefault());
+            }
+
+            public Task<long> CountAsync(
+                EntityReadPlan<Employee> plan,
+                CancellationToken cancellation
+            ) => session.CountAsync(plan, cancellation);
+
+            public Task<IReadOnlyList<Employee>> PageAsync(
+                EntityReadPlan<Employee> plan,
+                int offset,
+                int limit,
+                CancellationToken cancellation
+            ) => session.PageAsync(plan, offset, limit, cancellation);
+
+            public Task<Employee?> SingleAsync(
+                EntityReadPlan<Employee> plan,
+                CancellationToken cancellation
+            ) => session.SingleAsync(plan, cancellation);
+
+            public ValueTask DisposeAsync() => session.DisposeAsync();
+        }
+
+        sealed class ProjectedWithEntitySeekSession(RecordingAdapter owner, Session session)
+            : ProjectedSession(owner, session),
+                IEntitySeekReadSession<Employee>
+        {
+            public Task<IReadOnlyList<Employee>> SeekAsync(
+                EntitySeekPlan<Employee> plan,
+                int limit,
+                CancellationToken cancellation
+            ) => EntitySession.SeekAsync(plan, limit, cancellation);
+        }
+
+        sealed class ProjectedSeekSession(RecordingAdapter owner, Session session)
+            : ProjectedSession(owner, session),
+                IEntityProjectedSeekReadSession<Employee>
+        {
+            public Task<IReadOnlyList<ProjectedReadRow>> SeekProjectedAsync(
+                EntitySeekPlan<Employee> plan,
+                int limit,
+                CancellationToken cancellation
+            )
+            {
+                Owner.ProjectedSeekCalls++;
+                Owner.SeekLimits.Add(limit);
+                return Task.FromResult(
+                    Project(EntitySession.SeekRows(plan).Take(limit), plan.Read, plan)
+                );
+            }
+        }
+
+        sealed class EntityOnlySession(IEntityReadSession<Employee> session)
+            : IEntityReadSession<Employee>
+        {
+            public Task<long> CountAsync(EntityReadPlan<Employee> plan, CancellationToken token) =>
+                session.CountAsync(plan, token);
+
+            public Task<Employee?> SingleAsync(
+                EntityReadPlan<Employee> plan,
+                CancellationToken token
+            ) => session.SingleAsync(plan, token);
+
+            public Task<IReadOnlyList<Employee>> PageAsync(
+                EntityReadPlan<Employee> plan,
+                int offset,
+                int limit,
+                CancellationToken token
+            ) => session.PageAsync(plan, offset, limit, token);
+
+            public ValueTask DisposeAsync() => session.DisposeAsync();
+        }
+
+        sealed class Session(RecordingAdapter owner) : IEntitySeekReadSession<Employee>
+        {
+            internal IEnumerable<Employee> Query(EntityReadPlan<Employee> plan)
             {
                 if (owner.Fail)
                     throw new InvalidOperationException("Adapter failure");
@@ -71,11 +223,21 @@ public class RepositoryTests
                 return owner.Rows.Where(plan.Predicate.Compile());
             }
 
-            public Task<long> CountAsync(EntityReadPlan<Employee> p, CancellationToken c) =>
-                Task.FromResult(Query(p).LongCount());
+            public Task<long> CountAsync(EntityReadPlan<Employee> p, CancellationToken c)
+            {
+                owner.CountCalls++;
+                owner.OnCount?.Invoke();
+                c.ThrowIfCancellationRequested();
+                if (owner.FailCount)
+                    throw new InvalidOperationException("Count failure");
+                return Task.FromResult(owner.CountOverride ?? Query(p).LongCount());
+            }
 
-            public Task<Employee?> SingleAsync(EntityReadPlan<Employee> p, CancellationToken c) =>
-                Task.FromResult(Query(p).SingleOrDefault());
+            public Task<Employee?> SingleAsync(EntityReadPlan<Employee> p, CancellationToken c)
+            {
+                owner.SingleCalls++;
+                return Task.FromResult(Query(p).SingleOrDefault());
+            }
 
             public Task<IReadOnlyList<Employee>> PageAsync(
                 EntityReadPlan<Employee> p,
@@ -83,6 +245,16 @@ public class RepositoryTests
                 int limit,
                 CancellationToken c
             )
+            {
+                owner.PageCalls++;
+                owner.PageLimits.Add(limit);
+                owner.PageOffsets.Add(offset);
+                return Task.FromResult<IReadOnlyList<Employee>>(
+                    Order(p).Skip(offset).Take(limit).ToArray()
+                );
+            }
+
+            internal IEnumerable<Employee> Order(EntityReadPlan<Employee> p)
             {
                 IOrderedEnumerable<Employee>? sorted = null;
                 foreach (var s in p.Sort)
@@ -97,10 +269,41 @@ public class RepositoryTests
                             )
                             : (s.Descending ? sorted.ThenByDescending(key) : sorted.ThenBy(key));
                 }
+                return sorted!;
+            }
+
+            public Task<IReadOnlyList<Employee>> SeekAsync(
+                EntitySeekPlan<Employee> plan,
+                int limit,
+                CancellationToken cancellation
+            )
+            {
+                cancellation.ThrowIfCancellationRequested();
+                owner.SeekCalls++;
+                owner.SeekLimits.Add(limit);
                 return Task.FromResult<IReadOnlyList<Employee>>(
-                    sorted!.Skip(offset).Take(limit).ToArray()
+                    SeekRows(plan).Take(limit).ToArray()
                 );
             }
+
+            internal IEnumerable<Employee> SeekRows(EntitySeekPlan<Employee> plan) =>
+                Order(plan.Read)
+                    .Where(row =>
+                    {
+                        if (plan.Boundary == null)
+                            return true;
+                        for (var i = 0; i < plan.Read.Sort.Count; i++)
+                        {
+                            var sort = plan.Read.Sort[i];
+                            var compared = Comparer<object?>.Default.Compare(
+                                sort.Property.GetValue(row),
+                                plan.Boundary[i]
+                            );
+                            if (compared != 0)
+                                return sort.Descending ? compared < 0 : compared > 0;
+                        }
+                        return false;
+                    });
 
             public ValueTask DisposeAsync()
             {
@@ -110,16 +313,970 @@ public class RepositoryTests
         }
     }
 
-    static AuthorizedReadRepository<Employee> Repository(Source source, RecordingAdapter adapter) =>
+    static AuthorizedReadRepository<Employee> Repository(
+        Source source,
+        RecordingAdapter adapter,
+        CursorReadConfiguration? cursor = null,
+        Func<TrustedContext>? trusted = null,
+        ReadProjectionMode projectionMode = ReadProjectionMode.AllowEntityMaterialization
+    ) =>
         new(
             CompilerTests.Schema,
             CompilerTests.Compiler(),
             source,
             adapter,
+            trusted ?? (() => CompilerTests.Context()),
+            "scope",
+            new(2, 100, 1),
+            cursor,
+            projectionMode
+        );
+
+    static CursorReadConfiguration Cursor(
+        Func<string>? subject = null,
+        CursorTokenTests.Clock? clock = null
+    ) =>
+        new(
+            new DataProtectionContinuationTokenProtector(new EphemeralDataProtectionProvider()),
+            subject ?? (() => "subject"),
+            "dataset",
+            timeProvider: clock
+        );
+
+    [Theory]
+    [InlineData(ReadProjectionMode.Required, false, false)]
+    [InlineData(ReadProjectionMode.Required, false, true)]
+    [InlineData(ReadProjectionMode.Required, true, false)]
+    [InlineData(ReadProjectionMode.Required, true, true)]
+    [InlineData(ReadProjectionMode.AllowEntityMaterialization, false, false)]
+    [InlineData(ReadProjectionMode.AllowEntityMaterialization, false, true)]
+    [InlineData(ReadProjectionMode.AllowEntityMaterialization, true, false)]
+    [InlineData(ReadProjectionMode.AllowEntityMaterialization, true, true)]
+    public async Task Seek_capability_matrix_uses_only_explicit_absence_fallback(
+        ReadProjectionMode mode,
+        bool projectedSeek,
+        bool entitySeek
+    )
+    {
+        var adapter = new RecordingAdapter
+        {
+            SupportsProjection = true,
+            SupportsProjectedSeek = projectedSeek,
+            SupportsSeek = entitySeek,
+        };
+        var repo = Repository(new Source(), adapter, Cursor(), projectionMode: mode);
+        if (!projectedSeek && (mode == ReadProjectionMode.Required || !entitySeek))
+        {
+            await Assert.ThrowsAsync<NotSupportedException>(() =>
+                repo.ListCursorAsync(new(Limit: 1))
+            );
+            await using var export = repo.ExportAsync(new()).GetAsyncEnumerator();
+            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+                await export.MoveNextAsync()
+            );
+            Assert.Equal(0, adapter.CountCalls);
+            Assert.Equal(0, adapter.SeekCalls);
+        }
+        else
+        {
+            var page = await repo.ListCursorAsync(new(Selection: ["Id"], Limit: 1));
+            Assert.Equal(1, Assert.Single(page.Records).GetProperty("Id").GetInt32());
+            var ids = new List<int>();
+            await foreach (var batch in repo.ExportAsync(new(Selection: ["Id"])))
+                ids.Add(Assert.Single(batch.Records).GetProperty("Id").GetInt32());
+            Assert.Equal(new[] { 1, 2 }, ids);
+            Assert.Equal(projectedSeek ? 0 : 4, adapter.SeekCalls);
+            Assert.Equal(projectedSeek ? 4 : 0, adapter.ProjectedSeekCalls);
+        }
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Theory]
+    [InlineData(ReadProjectionMode.Required)]
+    [InlineData(ReadProjectionMode.AllowEntityMaterialization)]
+    public async Task Projected_only_seek_adapter_handles_all_operations_without_entity_retries(
+        ReadProjectionMode mode
+    )
+    {
+        var adapter = new RecordingAdapter { SupportsProjectedSeek = true };
+        var source = new Source();
+        var repo = Repository(source, adapter, Cursor(), projectionMode: mode);
+        var first = await repo.ListAsync(new(Selection: ["Name"], Limit: 1, IncludeHasMore: true));
+        Assert.True(first.HasMore);
+        Assert.Single(Assert.Single(first.Records).EnumerateObject());
+        var detail = await repo.DetailAsync(
+            new(JsonSerializer.SerializeToElement(1), Selection: [])
+        );
+        Assert.Equal("{}", detail.Record!.Value.GetRawText());
+        Assert.Null((await repo.DetailAsync(new(JsonSerializer.SerializeToElement(3)))).Record);
+        var request = new CursorListReadRequest(Selection: [], Limit: 1, IncludeTotal: false);
+        var cursor = await repo.ListCursorAsync(request);
+        Assert.Equal("{}", Assert.Single(cursor.Records).GetRawText());
+        Assert.Null(cursor.Total);
+        Assert.NotNull(cursor.NextContinuationToken);
+        var final = await repo.ListCursorAsync(
+            request with
+            {
+                ContinuationToken = cursor.NextContinuationToken,
+            }
+        );
+        Assert.Null(final.NextContinuationToken);
+        var ids = new List<int>();
+        await foreach (var batch in repo.ExportAsync(new(Selection: ["Id"])))
+            ids.Add(Assert.Single(batch.Records).GetProperty("Id").GetInt32());
+        Assert.Equal(new[] { 1, 2 }, ids);
+        Assert.Equal(new ReadCount(1, 2), await repo.CountAsync(new()));
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(0, adapter.SeekCalls);
+        Assert.Equal(0, adapter.SingleCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        var pages = adapter.ProjectedPageCalls;
+        adapter.Fail = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repo.ListAsync(new(Limit: 1, IncludeTotal: false))
+        );
+        await Assert.ThrowsAsync<InvalidOperationException>(() => repo.ListCursorAsync(request));
+        Assert.Equal(pages + 1, adapter.ProjectedPageCalls);
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(0, adapter.SeekCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
+    public async Task Required_projection_checks_relevant_capabilities_before_counts_and_disposes()
+    {
+        var adapter = new RecordingAdapter();
+        var repo = Repository(
+            new Source(),
+            adapter,
+            Cursor(),
+            projectionMode: ReadProjectionMode.Required
+        );
+        await Assert.ThrowsAsync<NotSupportedException>(() => repo.ListAsync(new(Limit: 1)));
+        await Assert.ThrowsAsync<NotSupportedException>(() =>
+            repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)))
+        );
+        await Assert.ThrowsAsync<NotSupportedException>(() => repo.ListCursorAsync(new(Limit: 1)));
+        await using (var export = repo.ExportAsync(new()).GetAsyncEnumerator())
+            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+                await export.MoveNextAsync()
+            );
+        Assert.Equal(0, adapter.CountCalls);
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(0, adapter.SeekCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        Assert.Equal(new ReadCount(1, 2), await repo.CountAsync(new()));
+        adapter.SupportsProjection = true;
+        await repo.ListAsync(new(Limit: 1));
+        var counts = adapter.CountCalls;
+        await Assert.ThrowsAsync<NotSupportedException>(() => repo.ListCursorAsync(new(Limit: 1)));
+        Assert.Equal(counts, adapter.CountCalls);
+        Assert.Equal(1, adapter.ProjectedPageCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        var mode = typeof(AuthorizedReadRepository<Employee>).GetConstructors()[0].GetParameters()[
+            ^1
+        ];
+        Assert.Equal(ReadProjectionMode.Required, mode.DefaultValue);
+        Assert.Equal(
+            ReadProjectionMode.Required,
+            typeof(Sqlite.AuthorizedReads<Employee>)
+                .GetConstructors()[0]
+                .GetParameters()[^1]
+                .DefaultValue
+        );
+        Assert.Throws<ArgumentException>(() =>
+            Repository(new Source(), adapter, projectionMode: (ReadProjectionMode)99)
+        );
+    }
+
+    [Theory]
+    [InlineData(ReadProjectionMode.Required)]
+    [InlineData(ReadProjectionMode.AllowEntityMaterialization)]
+    public async Task Malformed_projection_fails_whole_page_or_batch_without_entity_retry(
+        ReadProjectionMode mode
+    )
+    {
+        var adapter = new RecordingAdapter { SupportsProjectedSeek = true };
+        var repo = Repository(new Source(), adapter, Cursor(), projectionMode: mode);
+        foreach (
+            var invalid in new ProjectedReadRow[]
+            {
+                new([]),
+                new([1L]),
+                new([null]),
+                new([1, "extra"]),
+                new([1], [1]),
+            }
+        )
+        {
+            adapter.ProjectedRows = _ => [invalid];
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                repo.ListAsync(new(Selection: ["Id"], Limit: 1, IncludeTotal: false))
+            );
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                repo.DetailAsync(new(JsonSerializer.SerializeToElement(1), Selection: ["Id"]))
+            );
+        }
+        foreach (
+            var invalid in new ProjectedReadRow[]
+            {
+                new([1]),
+                new([1], [1L]),
+                new([1], [null]),
+                new([1], [1, 2]),
+            }
+        )
+        {
+            adapter.ProjectedRows = _ => [invalid];
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                repo.ListCursorAsync(new(Selection: ["Id"], Limit: 1, IncludeTotal: false))
+            );
+            await using var export = repo.ExportAsync(new(Selection: ["Id"])).GetAsyncEnumerator();
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await export.MoveNextAsync()
+            );
+        }
+        adapter.ProjectedRows = rows => rows.Concat([new ProjectedReadRow([1L])]).ToArray();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repo.ListAsync(
+                new(Selection: ["Id"], Limit: 1, IncludeTotal: false, IncludeHasMore: true)
+            )
+        );
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(0, adapter.SeekCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
+    public async Task Projected_export_captures_bindings_before_yield_and_disposes_early_or_on_cancellation()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter { SupportsProjectedSeek = true };
+        var repo = Repository(source, adapter, projectionMode: ReadProjectionMode.Required);
+        string[] selection = ["Id"];
+        await using (var export = repo.ExportAsync(new(Selection: selection)).GetAsyncEnumerator())
+        {
+            Assert.True(await export.MoveNextAsync());
+            selection[0] = "Salary";
+            source.Current = CompilerTests.Capture(CompilerTests.Definition(), 2);
+            adapter.Rows[0].Id = 99;
+            Assert.True(await export.MoveNextAsync());
+            Assert.Equal(1, export.Current.PolicyVersion);
+            Assert.Equal(2, Assert.Single(export.Current.Records).GetProperty("Id").GetInt32());
+        }
+        Assert.Equal(1, source.Captures);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        source.Current = CompilerTests.Capture(
+            CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow))
+        );
+        using var cancellation = new CancellationTokenSource();
+        await using (
+            var export = repo.ExportAsync(new(Selection: ["Id"]), cancellation.Token)
+                .GetAsyncEnumerator()
+        )
+        {
+            Assert.True(await export.MoveNextAsync());
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await export.MoveNextAsync()
+            );
+        }
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        Assert.Equal(0, adapter.SeekCalls);
+        Assert.Equal(0, adapter.PageCalls);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Offset_metadata_executes_only_requested_work(bool total, bool hasMore)
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter { FailCount = !total };
+        var repo = Repository(source, adapter);
+        var first = await repo.ListAsync(
+            new(Selection: ["Id"], Limit: 1, IncludeTotal: total, IncludeHasMore: hasMore)
+        );
+        Assert.Equal(total ? 2L : (long?)null, first.Total);
+        Assert.Equal(hasMore ? true : (bool?)null, first.HasMore);
+        Assert.Equal(1, Assert.Single(first.Records).GetProperty("Id").GetInt32());
+        var final = await repo.ListAsync(
+            new(Selection: [], Offset: 1, Limit: 1, IncludeTotal: total, IncludeHasMore: hasMore)
+        );
+        Assert.Equal(hasMore ? false : (bool?)null, final.HasMore);
+        Assert.Equal("{}", Assert.Single(final.Records).GetRawText());
+        var beyond = await repo.ListAsync(
+            new(Offset: 100, Limit: 1, IncludeTotal: total, IncludeHasMore: hasMore)
+        );
+        Assert.Empty(beyond.Records);
+        Assert.Equal(hasMore ? false : (bool?)null, beyond.HasMore);
+        var full = await repo.ListAsync(
+            new(Limit: 2, IncludeTotal: total, IncludeHasMore: hasMore)
+        );
+        Assert.Equal(2, full.Records.Count);
+        Assert.Equal(hasMore ? false : (bool?)null, full.HasMore);
+        var empty = await repo.ListAsync(
+            new(
+                Filter: CompilerTests.Leaf("Status", "eq", "Inactive"),
+                Limit: 1,
+                IncludeTotal: total,
+                IncludeHasMore: hasMore
+            )
+        );
+        Assert.Equal(total ? 0L : (long?)null, empty.Total);
+        Assert.Equal(hasMore ? false : (bool?)null, empty.HasMore);
+        Assert.Empty(empty.Records);
+        Assert.Equal(total ? 5 : 0, adapter.CountCalls);
+        Assert.Equal(
+            new[] { 1, 1, 1, 2, 1 }.Select(n => n + (hasMore ? 1 : 0)),
+            adapter.PageLimits
+        );
+        Assert.Equal(new[] { 0, 1, 100, 0, 0 }, adapter.PageOffsets);
+        Assert.Equal(5, source.Captures);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        Assert.Equal(0, adapter.SeekCalls);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Cursor_metadata_reuses_lookahead_and_flags_can_change_on_resume(
+        bool total,
+        bool hasMore
+    )
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter { FailCount = !total };
+        var repo = Repository(source, adapter, Cursor());
+        var request = new CursorListReadRequest(
+            Selection: ["Id"],
+            Limit: 1,
+            IncludeTotal: total,
+            IncludeHasMore: hasMore
+        );
+        var first = await repo.ListCursorAsync(request);
+        Assert.Equal(total ? 2L : (long?)null, first.Total);
+        Assert.Equal(hasMore ? true : (bool?)null, first.HasMore);
+        Assert.Equal(1, Assert.Single(first.Records).GetProperty("Id").GetInt32());
+        Assert.NotNull(first.NextContinuationToken);
+        Assert.Equal(total ? 1 : 0, adapter.CountCalls);
+        adapter.FailCount = total;
+        var final = await repo.ListCursorAsync(
+            request with
+            {
+                ContinuationToken = first.NextContinuationToken,
+                IncludeTotal = !total,
+                IncludeHasMore = !hasMore,
+            }
+        );
+        Assert.Equal(!total ? 2L : (long?)null, final.Total);
+        Assert.Equal(!hasMore ? false : (bool?)null, final.HasMore);
+        Assert.Equal(2, Assert.Single(final.Records).GetProperty("Id").GetInt32());
+        Assert.Null(final.NextContinuationToken);
+        Assert.Equal(1, adapter.CountCalls);
+        Assert.Equal(new[] { 2, 2 }, adapter.SeekLimits);
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(2, source.Captures);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
+    public async Task Has_more_uses_page_observation_and_count_failures_never_become_success()
+    {
+        var adapter = new RecordingAdapter { CountOverride = 0 };
+        var repo = Repository(new Source(), adapter, Cursor());
+        Assert.True((await repo.ListAsync(new(Limit: 1, IncludeHasMore: true))).HasMore);
+        Assert.True((await repo.ListCursorAsync(new(Limit: 1, IncludeHasMore: true))).HasMore);
+        adapter.CountOverride = 999;
+        Assert.False((await repo.ListAsync(new(Limit: 2, IncludeHasMore: true))).HasMore);
+        Assert.False((await repo.ListCursorAsync(new(Limit: 2, IncludeHasMore: true))).HasMore);
+        adapter.FailCount = true;
+        var pages = adapter.PageCalls;
+        var seeks = adapter.SeekCalls;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => repo.ListAsync(new(Limit: 1)));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repo.ListCursorAsync(new(Limit: 1))
+        );
+        Assert.Equal(pages, adapter.PageCalls);
+        Assert.Equal(seeks, adapter.SeekCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
+    public async Task No_count_cursor_handles_empty_hidden_final_rows_and_seek_failures()
+    {
+        var adapter = new RecordingAdapter { FailCount = true };
+        var repo = Repository(new Source(), adapter, Cursor());
+        var request = new CursorListReadRequest(
+            Selection: [],
+            Limit: 1,
+            IncludeTotal: false,
+            IncludeHasMore: true
+        );
+        var first = await repo.ListCursorAsync(request);
+        Assert.Null(first.Total);
+        Assert.True(first.HasMore);
+        Assert.Equal("{}", Assert.Single(first.Records).GetRawText());
+        var final = await repo.ListCursorAsync(
+            request with
+            {
+                ContinuationToken = first.NextContinuationToken,
+            }
+        );
+        Assert.False(final.HasMore);
+        Assert.Null(final.NextContinuationToken);
+        Assert.Equal("{}", Assert.Single(final.Records).GetRawText());
+        var empty = await repo.ListCursorAsync(
+            request with
+            {
+                Filter = CompilerTests.Leaf("Status", "eq", "Inactive"),
+            }
+        );
+        Assert.False(empty.HasMore);
+        Assert.Null(empty.Total);
+        Assert.Empty(empty.Records);
+        adapter.Fail = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => repo.ListCursorAsync(request));
+        Assert.Equal(0, adapter.CountCalls);
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
+    public async Task Unrepresentable_lookahead_is_rejected_before_sessions()
+    {
+        var adapter = new RecordingAdapter();
+        var repo = new AuthorizedReadRepository<Employee>(
+            CompilerTests.Schema,
+            CompilerTests.Compiler(),
+            new Source(),
+            adapter,
             () => CompilerTests.Context(),
             "scope",
-            new(2, 100, 1)
+            new(int.MaxValue, 100, 1),
+            Cursor(),
+            ReadProjectionMode.AllowEntityMaterialization
         );
+        await Assert.ThrowsAsync<AuthorizationException>(() =>
+            repo.ListAsync(new(Limit: int.MaxValue, IncludeHasMore: true))
+        );
+        await Assert.ThrowsAsync<AuthorizationException>(() =>
+            repo.ListCursorAsync(new(Limit: int.MaxValue, IncludeTotal: false))
+        );
+        Assert.Equal(0, adapter.Opened);
+        Assert.Equal(
+            2,
+            (await repo.ListAsync(new(Limit: int.MaxValue, IncludeTotal: false))).Records.Count
+        );
+        Assert.Equal(int.MaxValue, Assert.Single(adapter.PageLimits));
+    }
+
+    [Fact]
+    public async Task Count_retains_capture_during_publication_and_disposes_cancellation()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter
+        {
+            OnCount = () => source.Current = CompilerTests.Capture(CompilerTests.Definition(), 2),
+        };
+        var repo = Repository(source, adapter);
+        Assert.Equal(new ReadCount(1, 2), await repo.CountAsync(new()));
+        Assert.Equal(1, source.Captures);
+        Assert.Equal(1, adapter.CountCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        source.Current = CompilerTests.Capture(
+            CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow))
+        );
+        using var cancellation = new CancellationTokenSource();
+        adapter.OnCount = cancellation.Cancel;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            repo.CountAsync(new(), cancellation.Token)
+        );
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
+    public async Task Cursor_lookahead_uses_last_returned_boundary_and_base_total()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter();
+        var clock = new CursorTokenTests.Clock();
+        var repo = Repository(source, adapter, Cursor(clock: clock));
+        var request = new CursorListReadRequest(Selection: [], Sort: [new("Name")], Limit: 1);
+        var first = await repo.ListCursorAsync(request);
+        Assert.Equal(2, first.Total);
+        Assert.Equal("{}", Assert.Single(first.Records).GetRawText());
+        Assert.NotNull(first.NextContinuationToken);
+        var final = await repo.ListCursorAsync(
+            request with
+            {
+                ContinuationToken = first.NextContinuationToken,
+            }
+        );
+        Assert.Equal(2, final.Total);
+        Assert.Single(final.Records);
+        Assert.Null(final.NextContinuationToken);
+        Assert.Equal(2, source.Captures);
+        Assert.Equal(2, adapter.CountCalls);
+        Assert.Equal(new[] { 2, 2 }, adapter.SeekLimits);
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        clock.Now += TimeSpan.FromMinutes(15);
+        await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+            repo.ListCursorAsync(request with { ContinuationToken = first.NextContinuationToken })
+        );
+        Assert.Equal(2, adapter.Opened);
+    }
+
+    [Fact]
+    public async Task Cursor_rejects_changed_query_subject_context_policy_and_dataset_before_sessions()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter();
+        var subject = "subject";
+        var trusted = CompilerTests.Context();
+        var config = Cursor(() => subject);
+        var repo = Repository(source, adapter, config, () => trusted);
+        var request = new CursorListReadRequest(Limit: 1);
+        var first = await repo.ListCursorAsync(request);
+        var resume = request with { ContinuationToken = first.NextContinuationToken };
+        foreach (
+            var changed in new[]
+            {
+                resume with
+                {
+                    Limit = 2,
+                },
+                resume with
+                {
+                    Selection = ["Name"],
+                },
+                resume with
+                {
+                    Sort = [new("Name", true)],
+                },
+                resume with
+                {
+                    Filter = CompilerTests.Leaf("Status", "eq", "Active"),
+                },
+                resume with
+                {
+                    ContinuationToken = "invalid",
+                },
+                resume with
+                {
+                    ContinuationToken = "",
+                },
+            }
+        )
+            await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+                repo.ListCursorAsync(changed)
+            );
+        subject = "another";
+        await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+            repo.ListCursorAsync(resume)
+        );
+        subject = "subject";
+        trusted = CompilerTests.Context(department: 20);
+        await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+            repo.ListCursorAsync(resume)
+        );
+        trusted = new(["manager"], ["group"], CompilerTests.Context().Values);
+        await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+            repo.ListCursorAsync(resume)
+        );
+        trusted = CompilerTests.Context();
+        source.Current = source.Current with { Version = 2 };
+        await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+            repo.ListCursorAsync(resume)
+        );
+        source.Current = source.Current with { Version = 1 };
+        Assert.Null((await repo.ListCursorAsync(resume)).NextContinuationToken);
+        var other = Repository(
+            source,
+            adapter,
+            new(config.Protector, () => "subject", "other-dataset")
+        );
+        await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+            other.ListCursorAsync(resume)
+        );
+        Assert.Equal(2, adapter.Opened);
+        Assert.Equal(2, adapter.CountCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
+    public async Task Missing_configuration_capability_and_bad_limits_fail_without_queries()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter { SupportsSeek = false };
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Repository(source, adapter).ListCursorAsync(new(Limit: 1))
+        );
+        Assert.Equal(0, adapter.Opened);
+        var repo = Repository(source, adapter, Cursor());
+        foreach (var limit in new[] { 0, -1, 3 })
+            await Assert.ThrowsAsync<AuthorizationException>(() =>
+                repo.ListCursorAsync(new(Limit: limit))
+            );
+        Assert.Equal(0, adapter.Opened);
+        await Assert.ThrowsAsync<NotSupportedException>(() => repo.ListCursorAsync(new(Limit: 1)));
+        await using (var export = repo.ExportAsync(new()).GetAsyncEnumerator())
+            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+                await export.MoveNextAsync()
+            );
+        Assert.Equal(0, adapter.CountCalls);
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        Assert.Equal(new ReadCount(1, 2), await repo.CountAsync(new()));
+        Assert.Single((await repo.ListAsync(new(Limit: 1))).Records);
+        Assert.NotNull((await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)))).Record);
+    }
+
+    [Fact]
+    public async Task Cursor_snapshots_inputs_before_policy_capture()
+    {
+        string[] selection = ["Id"];
+        SortField[] sort = [new("Name")];
+        var filter = new Condition { All = [CompilerTests.Leaf("Status", "eq", "Active")] };
+        var source = new Source
+        {
+            OnCapture = () =>
+            {
+                selection[0] = "Salary";
+                sort[0] = new("Id");
+                filter.All![0] = CompilerTests.Leaf("Status", "eq", "Inactive");
+            },
+        };
+        var adapter = new RecordingAdapter();
+        var repo = Repository(source, adapter, Cursor());
+        var page = await repo.ListCursorAsync(new(selection, filter, sort, 1));
+        Assert.Equal(2, page.Total);
+        Assert.Equal(1, Assert.Single(page.Records).GetProperty("Id").GetInt32());
+        source.OnCapture = null;
+        var next = await repo.ListCursorAsync(
+            new(
+                ["Id"],
+                new() { All = [CompilerTests.Leaf("Status", "eq", "Active")] },
+                [new("Name")],
+                1,
+                page.NextContinuationToken
+            )
+        );
+        Assert.Equal(2, Assert.Single(next.Records).GetProperty("Id").GetInt32());
+        Assert.Null(next.NextContinuationToken);
+    }
+
+    [Fact]
+    public async Task Cursor_mutations_do_not_shift_remaining_fixed_sort_tuples()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter
+        {
+            Rows = Enumerable
+                .Range(1, 5)
+                .Select(id => new Employee
+                {
+                    Id = id,
+                    TenantId = 1,
+                    Name = "A",
+                })
+                .ToArray(),
+        };
+        var repo = Repository(source, adapter, Cursor());
+        var request = new CursorListReadRequest(Limit: 2);
+        var first = await repo.ListCursorAsync(request);
+        Assert.Equal(new[] { 1, 2 }, first.Records.Select(row => row.GetProperty("Id").GetInt32()));
+        adapter.Rows = adapter
+            .Rows.Where(row => row.Id > 2)
+            .Append(
+                new()
+                {
+                    Id = 0,
+                    TenantId = 1,
+                    Name = "A",
+                }
+            )
+            .Append(
+                new()
+                {
+                    Id = 6,
+                    TenantId = 1,
+                    Name = "A",
+                }
+            )
+            .ToArray();
+        var next = await repo.ListCursorAsync(
+            request with
+            {
+                ContinuationToken = first.NextContinuationToken,
+            }
+        );
+        Assert.Equal(new[] { 3, 4 }, next.Records.Select(row => row.GetProperty("Id").GetInt32()));
+        var final = await repo.ListCursorAsync(
+            request with
+            {
+                ContinuationToken = next.NextContinuationToken,
+            }
+        );
+        Assert.Equal(new[] { 5, 6 }, final.Records.Select(row => row.GetProperty("Id").GetInt32()));
+        Assert.Null(final.NextContinuationToken);
+        Assert.Equal(0, adapter.PageCalls);
+    }
+
+    [Fact]
+    public async Task Empty_short_and_full_cursor_pages_preserve_metadata_and_disposal()
+    {
+        var adapter = new RecordingAdapter();
+        var repo = Repository(new Source(), adapter, Cursor());
+        var full = await repo.ListCursorAsync(new(Limit: 2));
+        Assert.Equal(2, full.Total);
+        Assert.Equal(2, full.Records.Count);
+        Assert.Null(full.NextContinuationToken);
+        var empty = await repo.ListCursorAsync(
+            new(Limit: 1, Filter: CompilerTests.Leaf("Status", "eq", "Inactive"))
+        );
+        Assert.Equal(0, empty.Total);
+        Assert.Empty(empty.Records);
+        Assert.Null(empty.NextContinuationToken);
+        adapter.Rows = [adapter.Rows[0]];
+        var shortPage = await repo.ListCursorAsync(new(Limit: 2));
+        Assert.Equal(1, shortPage.Total);
+        Assert.Single(shortPage.Records);
+        Assert.Null(shortPage.NextContinuationToken);
+        adapter.Fail = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repo.ListCursorAsync(new(Limit: 1))
+        );
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        Assert.Equal(0, adapter.PageCalls);
+    }
+
+    [Fact]
+    public async Task Export_snapshots_request_and_boundary_before_yield_and_ignores_position_shifts()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter
+        {
+            Rows = Enumerable
+                .Range(1, 5)
+                .Select(id => new Employee
+                {
+                    Id = id,
+                    TenantId = 1,
+                    Name = "A",
+                })
+                .ToArray(),
+        };
+        var repo = Repository(source, adapter);
+        string[] selection = ["Id"];
+        SortField[] sort = [new("Name")];
+        await using var export = repo.ExportAsync(new(selection, Sort: sort)).GetAsyncEnumerator();
+        Assert.True(await export.MoveNextAsync());
+        Assert.Equal(1, export.Current.Records[0].GetProperty("Id").GetInt32());
+        selection[0] = "Salary";
+        sort[0] = new("Name", true);
+        adapter.Rows[0].Id = 99;
+        adapter.Rows = adapter
+            .Rows.Skip(1)
+            .Append(
+                new()
+                {
+                    Id = 0,
+                    TenantId = 1,
+                    Name = "A",
+                }
+            )
+            .Append(
+                new()
+                {
+                    Id = 6,
+                    TenantId = 1,
+                    Name = "A",
+                }
+            )
+            .Append(
+                new()
+                {
+                    Id = 7,
+                    TenantId = 2,
+                    Name = "Hidden",
+                }
+            )
+            .ToArray();
+        var remaining = new List<int>();
+        while (await export.MoveNextAsync())
+            remaining.Add(Assert.Single(export.Current.Records).GetProperty("Id").GetInt32());
+        Assert.Equal(new[] { 2, 3, 4, 5, 6 }, remaining);
+        Assert.Equal(1, source.Captures);
+        Assert.Equal(0, adapter.PageCalls);
+        Assert.All(adapter.SeekLimits, value => Assert.Equal(1, value));
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
+    public async Task Invalid_operation_inputs_never_open_entity_sessions()
+    {
+        var adapter = new RecordingAdapter();
+        var repo = Repository(new Source(), adapter);
+        foreach (
+            var request in new[]
+            {
+                new ListReadRequest(Selection: ["Salary"], Limit: 1),
+                new ListReadRequest(Selection: ["Manager.Id"], Limit: 1),
+                new ListReadRequest(Filter: CompilerTests.Leaf("Salary", "eq", 100), Limit: 1),
+                new ListReadRequest(Filter: CompilerTests.Reference("Status", "tenant"), Limit: 1),
+                new ListReadRequest(Sort: [new("Id")], Limit: 1),
+                new ListReadRequest(Limit: 0),
+                new ListReadRequest(Limit: 3),
+                new ListReadRequest(Offset: -1, Limit: 1),
+                new ListReadRequest(Offset: 101, Limit: 1),
+            }
+        )
+            await Assert.ThrowsAsync<AuthorizationException>(() => repo.ListAsync(request));
+        await Assert.ThrowsAsync<AuthorizationException>(() =>
+            repo.CountAsync(new(CompilerTests.Leaf("Salary", "eq", 100)))
+        );
+        foreach (
+            var key in new[]
+            {
+                default(JsonElement),
+                JsonSerializer.SerializeToElement<object?>(null),
+                JsonSerializer.SerializeToElement("1"),
+                JsonSerializer.SerializeToElement(1.5),
+                JsonSerializer.SerializeToElement(new { Id = 1 }),
+            }
+        )
+            await Assert.ThrowsAsync<AuthorizationException>(() => repo.DetailAsync(new(key)));
+        var validKey = JsonSerializer.SerializeToElement(1);
+        await Assert.ThrowsAsync<AuthorizationException>(() =>
+            repo.DetailAsync(new(validKey, Selection: ["Salary"]))
+        );
+        await Assert.ThrowsAsync<AuthorizationException>(() =>
+            repo.DetailAsync(new(validKey, Filter: CompilerTests.Leaf("Id", "eq", 1)))
+        );
+        foreach (
+            var request in new[]
+            {
+                new ExportReadRequest(Selection: ["Salary"]),
+                new ExportReadRequest(Filter: CompilerTests.Leaf("Salary", "eq", 100)),
+                new ExportReadRequest(Sort: [new("Id")]),
+            }
+        )
+        {
+            await using var export = repo.ExportAsync(request).GetAsyncEnumerator();
+            await Assert.ThrowsAsync<AuthorizationException>(async () =>
+                await export.MoveNextAsync()
+            );
+        }
+        Assert.Equal(0, adapter.Opened);
+    }
+
+    [Fact]
+    public async Task Non_list_operations_ignore_default_page_limit_and_count_needs_no_output_grants()
+    {
+        var policy = CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow));
+        var source = new Source
+        {
+            Current = CompilerTests.Capture(
+                policy with
+                {
+                    FieldEntries =
+                    [
+                        policy.FieldEntries[0] with
+                        {
+                            Fields = new() { [FieldOperation.Filter] = ["Status"] },
+                        },
+                    ],
+                }
+            ),
+        };
+        var adapter = new RecordingAdapter();
+        var repo = Repository(source, adapter);
+        Assert.Equal(new ReadCount(1, 2), await repo.CountAsync(new()));
+        Assert.Equal(1, source.Captures);
+        Assert.Equal(
+            2,
+            (await repo.CountAsync(new(CompilerTests.Leaf("Status", "eq", "Active")))).Total
+        );
+        var detail = await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)));
+        Assert.Equal("{}", detail.Record!.Value.GetRawText());
+        var excluded = await repo.DetailAsync(
+            new(
+                JsonSerializer.SerializeToElement(1),
+                Filter: CompilerTests.Leaf("Status", "eq", "Inactive")
+            )
+        );
+        Assert.Null(excluded.Record);
+        var page = await repo.ListAsync(new(Limit: 1));
+        Assert.Equal(2, page.Total);
+        Assert.Equal("{}", Assert.Single(page.Records).GetRawText());
+        var captures = source.Captures;
+        var exported = new List<JsonElement>();
+        await foreach (var batch in repo.ExportAsync(new()))
+            exported.AddRange(batch.Records);
+        Assert.Equal(captures + 1, source.Captures);
+        Assert.Equal(2, exported.Count);
+        Assert.All(exported, row => Assert.Equal("{}", row.GetRawText()));
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+        await Assert.ThrowsAsync<AuthorizationException>(() => repo.ListAsync(new()));
+    }
+
+    [Fact]
+    public async Task Detail_selection_filter_and_host_key_lookup_preserve_protected_results()
+    {
+        var repo = Repository(new Source(), new RecordingAdapter());
+        var key = JsonSerializer.SerializeToElement(1);
+        var detail = await repo.DetailAsync(new(key, Selection: ["Id", "Name"]));
+        Assert.Equal(
+            new[] { "Id", "Name" },
+            detail.Record!.Value.EnumerateObject().Select(p => p.Name)
+        );
+        Assert.Equal(
+            "{}",
+            (await repo.DetailAsync(new(key, Selection: []))).Record!.Value.GetRawText()
+        );
+        Assert.NotNull(
+            (
+                await repo.DetailAsync(
+                    new(key, Filter: CompilerTests.Leaf("Status", "eq", "Active"))
+                )
+            ).Record
+        );
+        Assert.Null(
+            (
+                await repo.DetailAsync(
+                    new(key, Filter: CompilerTests.Leaf("Status", "eq", "Inactive"))
+                )
+            ).Record
+        );
+        Assert.Equal(
+            2,
+            (await repo.CountAsync(new(CompilerTests.Leaf("Status", "eq", "Active")))).Total
+        );
+    }
+
+    [Fact]
+    public async Task Count_detail_and_export_failures_dispose_without_retry()
+    {
+        var adapter = new RecordingAdapter { Fail = true };
+        var repo = Repository(new Source(), adapter);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => repo.CountAsync(new()));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)))
+        );
+        await using (var export = repo.ExportAsync(new()).GetAsyncEnumerator())
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await export.MoveNextAsync()
+            );
+        Assert.Equal(3, adapter.Opened);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
 
     [Fact]
     public async Task Warm_shapes_do_not_cache_grants_or_change_captured_export_fields()
@@ -140,7 +1297,7 @@ public class RepositoryTests
         };
         var warm = await repo.ListAsync(new(Limit: 1));
         Assert.Equal(new[] { "Id", "Name" }, warm.Records[0].EnumerateObject().Select(p => p.Name));
-        await using var export = repo.ExportAsync(new(Limit: 1)).GetAsyncEnumerator();
+        await using var export = repo.ExportAsync(new()).GetAsyncEnumerator();
         Assert.True(await export.MoveNextAsync());
         source.Current = CompilerTests.Capture(narrow, 2);
         var opened = adapter.Opened;
@@ -152,7 +1309,7 @@ public class RepositoryTests
         var page = await repo.ListAsync(new(Limit: 1));
         Assert.Equal(2, page.PolicyVersion);
         Assert.Equal("{\"Name\":\"A\"}", page.Records[0].GetRawText());
-        var detail = await repo.DetailAsync(JsonSerializer.SerializeToElement(1), new(Limit: 1));
+        var detail = await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)));
         Assert.Equal(2, detail.PolicyVersion);
         Assert.Equal("{\"Name\":\"A\"}", detail.Record!.Value.GetRawText());
         Assert.True(await export.MoveNextAsync());
@@ -162,7 +1319,7 @@ public class RepositoryTests
             export.Current.Records[0].EnumerateObject().Select(p => p.Name)
         );
         Assert.False(await export.MoveNextAsync());
-        await foreach (var batch in repo.ExportAsync(new(Limit: 1)))
+        await foreach (var batch in repo.ExportAsync(new()))
         {
             Assert.Equal(2, batch.PolicyVersion);
             Assert.All(batch.Records, row => Assert.Equal("{\"Name\":\"A\"}", row.GetRawText()));
@@ -184,18 +1341,14 @@ public class RepositoryTests
         Assert.Equal(2, page.Total);
         Assert.Equal(1, page.Records[0].GetProperty("Id").GetInt32());
         Assert.Equal(2, page.Records[0].EnumerateObject().Count());
-        Assert.Equal(2, await repo.CountAsync(new(Limit: 1)));
-        Assert.Null(
-            (await repo.DetailAsync(JsonSerializer.SerializeToElement(3), new(Limit: 1))).Record
-        );
-        Assert.Null(
-            (await repo.DetailAsync(JsonSerializer.SerializeToElement(99), new(Limit: 1))).Record
-        );
+        Assert.Equal(new ReadCount(1, 2), await repo.CountAsync(new()));
+        Assert.Null((await repo.DetailAsync(new(JsonSerializer.SerializeToElement(3)))).Record);
+        Assert.Null((await repo.DetailAsync(new(JsonSerializer.SerializeToElement(99)))).Record);
         Assert.Equal(
             "{}",
             (await repo.ListAsync(new(Selection: [], Limit: 1))).Records[0].GetRawText()
         );
-        await using (var export = repo.ExportAsync(new(Limit: 1)).GetAsyncEnumerator())
+        await using (var export = repo.ExportAsync(new()).GetAsyncEnumerator())
         {
             Assert.True(await export.MoveNextAsync());
             source.Current = CompilerTests.Capture(CompilerTests.Definition(), 2);
@@ -203,7 +1356,7 @@ public class RepositoryTests
             Assert.Equal(1, export.Current.PolicyVersion);
         }
         Assert.Equal(adapter.Opened, adapter.Disposed);
-        await Assert.ThrowsAsync<AuthorizationException>(() => repo.CountAsync(new(Limit: 1)));
+        await Assert.ThrowsAsync<AuthorizationException>(() => repo.CountAsync(new()));
     }
 
     [Fact]
@@ -215,8 +1368,7 @@ public class RepositoryTests
         Assert.Equal(1, adapter.Disposed);
         adapter.Fail = false;
         using var cancellation = new CancellationTokenSource();
-        await using var export = repo.ExportAsync(new(Limit: 1), cancellation.Token)
-            .GetAsyncEnumerator();
+        await using var export = repo.ExportAsync(new(), cancellation.Token).GetAsyncEnumerator();
         Assert.True(await export.MoveNextAsync());
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>

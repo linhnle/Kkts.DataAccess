@@ -3,10 +3,12 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using EmployeeApp;
 using Kkts.DataAccess;
+using Kkts.DataAccess.DataProtection;
 using Kkts.DataAccess.Sqlite;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -28,6 +30,13 @@ builder
     });
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery();
+var cursorKeys =
+    builder.Configuration["CursorKeys"]
+    ?? Path.Combine(builder.Environment.ContentRootPath, ".cursor-keys");
+builder
+    .Services.AddDataProtection()
+    .SetApplicationName(builder.Configuration["CursorApplication"] ?? "Kkts.EmployeeApp")
+    .PersistKeysToFileSystem(new DirectoryInfo(cursorKeys));
 var connection = builder.Configuration["Database"] ?? "Data Source=employee.db";
 var provider = builder.Configuration["EntityProvider"] ?? "Sqlite";
 if (provider is not ("Sqlite" or "SqlServer" or "MySql"))
@@ -75,6 +84,9 @@ var compiler = new PolicyCompiler<Employee>(
     EmployeeConfiguration.Mandatory
 );
 var app = builder.Build();
+var cursorProtector = new DataProtectionContinuationTokenProtector(
+    app.Services.GetRequiredService<IDataProtectionProvider>()
+);
 app.Use(
     async (http, next) =>
     {
@@ -89,6 +101,7 @@ app.Use(
                         or JsonException
                         or AntiforgeryValidationException
                         or BadHttpRequestException
+                        or InvalidContinuationTokenException
             )
         {
             http.Response.StatusCode =
@@ -132,7 +145,15 @@ IAuthorizedReadRepository<Employee> Reads(HttpContext http) =>
         store,
         entityAdapter,
         () => EmployeeConfiguration.Context(http.User),
-        EmployeeConfiguration.Scope(http.User)
+        EmployeeConfiguration.Scope(http.User),
+        cursor: new(
+            cursorProtector,
+            () =>
+                http.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? throw new AuthorizationException("Authenticated subject required."),
+            builder.Configuration["CursorDataset"] ?? $"synthetic-employee-{provider}-v1"
+        ),
+        projectionMode: ReadProjectionMode.Required
     );
 string Token(HttpContext http) =>
     HtmlEncoder.Default.Encode(
@@ -212,7 +233,7 @@ app.MapGet(
     .RequireAuthorization();
 app.MapPost(
         "/employees/list",
-        async (HttpContext http, ReadRequest request) =>
+        async (HttpContext http, ListReadRequest request) =>
         {
             await Protect(http);
             return await Reads(http).ListAsync(request, http.RequestAborted);
@@ -220,8 +241,17 @@ app.MapPost(
     )
     .RequireAuthorization();
 app.MapPost(
+        "/employees/cursor",
+        async (HttpContext http, CursorListReadRequest request) =>
+        {
+            await Protect(http);
+            return await Reads(http).ListCursorAsync(request, http.RequestAborted);
+        }
+    )
+    .RequireAuthorization();
+app.MapPost(
         "/employees/count",
-        async (HttpContext http, ReadRequest request) =>
+        async (HttpContext http, CountReadRequest request) =>
         {
             await Protect(http);
             return await Reads(http).CountAsync(request, http.RequestAborted);
@@ -233,14 +263,14 @@ app.MapGet(
         async (HttpContext http, int id) =>
         {
             var detail = await Reads(http)
-                .DetailAsync(JsonSerializer.SerializeToElement(id), new(), http.RequestAborted);
+                .DetailAsync(new(JsonSerializer.SerializeToElement(id)), http.RequestAborted);
             return detail.Record == null ? Results.NotFound() : Results.Json(detail);
         }
     )
     .RequireAuthorization();
 app.MapPost(
         "/employees/export",
-        async (HttpContext http, ReadRequest request) =>
+        async (HttpContext http, ExportReadRequest request) =>
         {
             await Protect(http);
             http.Response.ContentType = "application/x-ndjson";

@@ -357,6 +357,12 @@
           "Kkts.Expressions": "[3.1.0, )"
         }
       },
+      "kkts.dataaccess.dataprotection": {
+        "type": "Project",
+        "dependencies": {
+          "Kkts.DataAccess": "[0.1.0, )"
+        }
+      },
       "kkts.dataaccess.entityframeworkcore": {
         "type": "Project",
         "dependencies": {

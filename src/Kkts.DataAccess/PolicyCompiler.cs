@@ -30,6 +30,12 @@ public sealed class PolicyCompiler<T>
     readonly string compilerVersion;
     readonly ExpressionsAdapter<T> expressions;
     readonly PolicyValidator<T> validator;
+    internal ContextRegistry ContextRegistry { get; }
+    internal string CursorBindingIdentity =>
+        JsonSerializer.Serialize(new { compilerVersion, mandatory }, PolicyJson.Options);
+
+    internal string CursorPolicyIdentity(string scope, long version) =>
+        templates[(scope, schema.Resource, schema.Version, version, compilerVersion)].Payload;
 
     private sealed record CompilationTemplate(string Payload, PolicyDefinition Definition);
 
@@ -47,6 +53,7 @@ public sealed class PolicyCompiler<T>
     )
     {
         this.schema = schema;
+        ContextRegistry = registry;
         this.mandatory = JsonSerializer.Deserialize<Condition>(
             JsonSerializer.Serialize(mandatory, PolicyJson.Options),
             PolicyJson.Options

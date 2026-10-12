@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
     <ItemGroup>
+        <ProjectReference Include="../../src/Kkts.DataAccess.DataProtection/Kkts.DataAccess.DataProtection.csproj" />
         <ProjectReference Include="../../src/Kkts.DataAccess.SqlServer/Kkts.DataAccess.SqlServer.csproj" />
         <ProjectReference Include="../../src/Kkts.DataAccess.MySql/Kkts.DataAccess.MySql.csproj" />
         <ProjectReference Include="../../src/Kkts.DataAccess.Sqlite/Kkts.DataAccess.Sqlite.csproj" />

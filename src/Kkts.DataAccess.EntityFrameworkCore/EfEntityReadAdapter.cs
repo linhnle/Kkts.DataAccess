@@ -50,7 +50,9 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
         }
     }
 
-    sealed class Session(DbContext db) : IEntityReadSession<T>
+    sealed class Session(DbContext db)
+        : IEntitySeekReadSession<T>,
+            IEntityProjectedSeekReadSession<T>
     {
         IQueryable<T> Query(EntityReadPlan<T> plan) =>
             db.Set<T>().AsNoTracking().Where(plan.Predicate);
@@ -60,6 +62,47 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
 
         public Task<T?> SingleAsync(EntityReadPlan<T> plan, CancellationToken cancellation) =>
             Query(plan).SingleOrDefaultAsync(cancellation);
+
+        public async Task<ProjectedReadRow?> SingleProjectedAsync(
+            EntityReadPlan<T> plan,
+            CancellationToken cancellation
+        )
+        {
+            var projection = new EfProjection<T>(db, plan);
+            return await projection.SingleAsync(Query(plan), cancellation);
+        }
+
+        public async Task<IReadOnlyList<ProjectedReadRow>> PageProjectedAsync(
+            EntityReadPlan<T> plan,
+            int offset,
+            int limit,
+            CancellationToken cancellation
+        )
+        {
+            var projection = new EfProjection<T>(db, plan);
+            var query = Query(plan)
+                .OrderBy(
+                    plan.Sort.Select(sort => new OrderByInfo
+                    {
+                        Property = sort.Property.Name,
+                        Descending = sort.Descending,
+                    })
+                );
+            return await projection.ReadAsync(query.Skip(offset).Take(limit), cancellation);
+        }
+
+        public async Task<IReadOnlyList<ProjectedReadRow>> SeekProjectedAsync(
+            EntitySeekPlan<T> plan,
+            int limit,
+            CancellationToken cancellation
+        )
+        {
+            if (limit < 1)
+                throw new ArgumentOutOfRangeException(nameof(limit));
+            var projection = new EfProjection<T>(db, plan.Read, plan);
+            var query = EfSeekQuery<T>.Apply(db, Query(plan.Read), plan);
+            return await projection.ReadAsync(query.Take(limit), cancellation);
+        }
 
         public async Task<IReadOnlyList<T>> PageAsync(
             EntityReadPlan<T> plan,
@@ -77,6 +120,19 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
                 })
             );
             return await query.Skip(offset).Take(limit).ToListAsync(cancellation);
+        }
+
+        public async Task<IReadOnlyList<T>> SeekAsync(
+            EntitySeekPlan<T> plan,
+            int limit,
+            CancellationToken cancellation
+        )
+        {
+            if (limit < 1)
+                throw new ArgumentOutOfRangeException(nameof(limit));
+            var query = Query(plan.Read);
+            query = EfSeekQuery<T>.Apply(db, query, plan);
+            return await query.Take(limit).ToListAsync(cancellation);
         }
 
         public ValueTask DisposeAsync() => db.DisposeAsync();
