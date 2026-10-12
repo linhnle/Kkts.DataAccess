@@ -13,6 +13,13 @@ Core retains Kkts.Expressions 3.1.0 and Kkts.Dynamic 2.1.0. Shared execution use
 
 This is a verified baseline, not a promise that every registered scalar/operator translates. Collation is controlled by the host database; production collation can differ. DateTimeOffset and high-precision numeric combinations need explicit host/provider validation. Provider translation errors propagate; no fallback or local authorization evaluation is used. Core literal conversion still rejects lossy inputs.
 
+Explicit known projection/seek/snapshot capability checks now throw
+`ProviderUnsupportedException` with `provider_unsupported`. Unmapped bindings
+use safe generic messages rather than internal property names. This does not
+classify arbitrary SQL/translation/connection failures: those still propagate
+with their original causes and no fallback. Startup provider-identity errors
+remain host configuration failures. See [structured errors](errors.md).
+
 The table records the earlier provider baseline. The operation-specific API
 migration uses the same trusted adapter/session contracts on all providers:
 list/count/detail/export take their distinct requests, with detail's key inside
@@ -43,6 +50,54 @@ Custom adapters still consume the provider-neutral `EntityReadPlan<T>` without
 requiring IQueryable or Expressions.
 
 ## Seek execution
+
+### Owned asynchronous context factories
+
+The optional [DI integration](dependency-injection.md) wires these helpers into
+scoped resources and asynchronous hosted startup validation without introducing
+an EF dependency into the DI package.
+
+Provider helpers now require the resource schema and declared operations:
+
+```csharp
+var adapter = SqliteEntityReads.Create<Employee, EmployeeDatabase>(
+    schema, factory, ReadOperations.All);
+// Outside a hosted registration, validate explicitly:
+await adapter.ValidateAsync(schema, cancellation);
+// Or create and validate together:
+var validated = await SqliteEntityReads.CreateAsync<Employee, EmployeeDatabase>(
+    schema, factory, ReadOperations.All, cancellation);
+```
+
+`Create<TEntity>(schema, Func<DbContext>, operations)` validates synchronously.
+The schema-less helper overloads are removed in this pre-release breaking change.
+The owned `IDbContextFactory` overload defers
+validation to the registration hook or runtime; the latter asynchronously
+creates/disposes a temporary context to check provider/model identity.
+`EfEntityReadAdapter<TEntity>.ValidateAsync(schema, cancellation)` additionally
+checks the registered scalar bindings, without opening a connection or querying
+application data.
+
+All factory-created sessions use `CreateDbContextAsync(token)`. Creation/setup
+failure, normal reads, and early enumeration cleanup dispose owned contexts.
+Best-effort export owns a context per batch; snapshot export owns one context and
+transaction until enumeration ends. Pooled factories are supported: disposal
+returns contexts to the pool and EF resets tracking state.
+
+Never pass a DI-resolved request DbContext as though it were an owned factory
+result. Use a real `IDbContextFactory<TContext>` (or the existing direct delegate
+that constructs a fresh context). No registration hook provisions databases,
+publishes policy, acquires request identity, or exercises sample authorized
+reads. Startup checks do not guarantee runtime translation, connectivity, or
+snapshot prerequisites; these retain explicit runtime failure semantics.
+
+`ReadOperations.All` covers offset, detail, count, cursor and export; it excludes
+snapshot. Declare `ReadOperations.All | ReadOperations.Snapshot` for snapshot
+exports (which also require Export), or narrow the mask to supported uses.
+Count-only resources need not support output or seek. Disabled operations fail
+before identity acquisition, policy capture or session creation. See
+[model/provider capabilities](provider-capabilities.md) for profile inspection,
+policy binding and runtime boundaries.
 
 The shared EF session implements `IEntitySeekReadSession<T>` for cursor pages and
 keyset exports. Seek explicitly orders nulls first ascending/last descending,

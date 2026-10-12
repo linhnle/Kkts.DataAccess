@@ -21,6 +21,31 @@ public sealed class AuthorizedReads<T> : IAuthorizedReadRepository<T>
         ReadProjectionMode projectionMode = ReadProjectionMode.Required,
         ExportReadConfiguration? export = null
     )
+        : this(
+            schema,
+            compiler,
+            store,
+            database,
+            new SynchronousTrustedContextProvider(context),
+            scope,
+            limits,
+            cursor,
+            projectionMode,
+            export
+        ) { }
+
+    public AuthorizedReads(
+        ResourceSchema<T> schema,
+        PolicyCompiler<T> compiler,
+        SqlitePolicyStore store,
+        Func<DbContext> database,
+        ITrustedContextProvider context,
+        string scope,
+        ReadLimits? limits = null,
+        CursorReadConfiguration? cursor = null,
+        ReadProjectionMode projectionMode = ReadProjectionMode.Required,
+        ExportReadConfiguration? export = null
+    )
     {
         repository = new(
             schema,
@@ -37,6 +62,44 @@ public sealed class AuthorizedReads<T> : IAuthorizedReadRepository<T>
             cursor,
             projectionMode,
             export
+        );
+    }
+
+    AuthorizedReads(AuthorizedReadRepository<T> repository) => this.repository = repository;
+
+    public static async Task<AuthorizedReads<T>> CreateAsync<TContext>(
+        ResourceSchema<T> schema,
+        PolicyCompiler<T> compiler,
+        SqlitePolicyStore store,
+        IDbContextFactory<TContext> database,
+        ITrustedContextProvider context,
+        string scope,
+        ReadLimits? limits = null,
+        CursorReadConfiguration? cursor = null,
+        ReadProjectionMode projectionMode = ReadProjectionMode.Required,
+        ExportReadConfiguration? export = null,
+        ReadOperations operations = ReadOperations.All,
+        CancellationToken cancellation = default
+    )
+        where TContext : DbContext
+    {
+        if (export?.DataConsistency == ExportDataConsistency.Snapshot)
+            operations |= ReadOperations.Snapshot;
+        var adapter = SqliteEntityReads.Create<T, TContext>(schema, database, operations);
+        await adapter.ValidateAsync(schema, cancellation);
+        return new(
+            new AuthorizedReadRepository<T>(
+                schema,
+                compiler,
+                store,
+                adapter,
+                context,
+                scope,
+                limits,
+                cursor,
+                projectionMode,
+                export
+            )
         );
     }
 

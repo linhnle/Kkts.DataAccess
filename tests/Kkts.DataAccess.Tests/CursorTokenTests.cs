@@ -121,7 +121,7 @@ public class CursorTokenTests
         Assert.Null(
             CursorScalarCodec.Decode(typeof(int?), CursorScalarCodec.Encode(typeof(int?), null))
         );
-        Assert.Throws<NotSupportedException>(() =>
+        Assert.Throws<ProviderUnsupportedException>(() =>
             CursorScalarCodec.Encode(typeof(object), new object())
         );
         Assert.Throws<ArgumentException>(() => CursorScalarCodec.Encode(typeof(int), 1L));
@@ -361,6 +361,102 @@ public class CursorTokenTests
 
         public byte[] Unprotect(byte[] payload) =>
             throw new InvalidOperationException("Configuration failure");
+    }
+
+    [Fact]
+    public async Task Eviction_between_binding_and_fingerprinting_preserves_operation_identity()
+    {
+        var schema = CompilerTests.Schema;
+        var compiler = new PolicyCompiler<CompilerTests.Employee>(
+            schema,
+            CompilerTests.Registry,
+            CompilerTests.Reference("TenantId", "tenant"),
+            cacheOptions: new(1)
+        );
+        var captured = CompilerTests.Capture(
+            CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow))
+        );
+        var trusted = CompilerTests.Context();
+        var bound = compiler.Bind(captured, trusted, "scope");
+        var plan = Read();
+        string Fingerprint(CursorReadConfiguration config) =>
+            CursorTokens.Binding(
+                schema,
+                compiler,
+                bound,
+                trusted,
+                "scope",
+                config,
+                ["Id", "Name"],
+                null,
+                plan,
+                1
+            );
+        var config = new CursorReadConfiguration(
+            new IdentityProtector(),
+            () => "subject",
+            "dataset",
+            timeProvider: new Clock()
+        );
+        var original = Fingerprint(config);
+        var envelope = CursorTokens.New(config, original, bound.Version);
+        var token = CursorTokens.Protect(
+            config,
+            envelope,
+            new EntitySeekPlan<CompilerTests.Employee>(plan, [1])
+        );
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        var gated = new CursorReadConfiguration(
+            new IdentityProtector(),
+            () =>
+            {
+                entered.SetResult();
+                if (!release.Wait(TimeSpan.FromSeconds(10)))
+                    throw new TimeoutException("Fingerprint gate was not released.");
+                return "subject";
+            },
+            "dataset",
+            timeProvider: new Clock()
+        );
+        var fingerprinting = Task.Run(() => Fingerprint(gated));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            compiler.Bind(captured with { Version = 2 }, CompilerTests.Context(tenant: 2), "scope");
+            Assert.Equal(new long[] { 2 }, compiler.TemplateInsertionOrder);
+        }
+        finally
+        {
+            release.Set();
+        }
+        var evicted = await fingerprinting;
+        Assert.Equal(original, evicted);
+        Assert.Equal(captured.Payload, bound.PolicyIdentity);
+        Assert.Equal(1, bound.Version);
+        Assert.Equal(
+            1,
+            CursorTokens.Unprotect(config, token, evicted, bound.Version, plan).Seek.Boundary![0]
+        );
+
+        var rebound = compiler.Bind(captured, trusted, "scope");
+        var cold = CursorTokens.Binding(
+            schema,
+            compiler,
+            rebound,
+            trusted,
+            "scope",
+            config,
+            ["Id", "Name"],
+            null,
+            plan,
+            1
+        );
+        Assert.Equal(original, cold);
+        Assert.Equal(
+            1,
+            CursorTokens.Unprotect(config, token, cold, rebound.Version, plan).Seek.Boundary![0]
+        );
     }
 
     [Fact]

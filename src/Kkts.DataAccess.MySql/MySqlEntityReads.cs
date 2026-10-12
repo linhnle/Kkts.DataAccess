@@ -7,9 +7,51 @@ namespace Kkts.DataAccess.MySql;
 
 public static class MySqlEntityReads
 {
-    public static IEntityReadAdapter<T> Create<T>(Func<DbContext> database)
+    public static EfEntityReadAdapter<T> Create<T, TContext>(
+        ResourceSchema<T> schema,
+        IDbContextFactory<TContext> database,
+        ReadOperations operations = ReadOperations.All
+    )
+        where T : class
+        where TContext : DbContext =>
+        EfEntityReadAdapter<T>.Create(
+            schema,
+            database,
+            "MySql.EntityFrameworkCore",
+            operations,
+            BeginSnapshot<T>
+        );
+
+    public static Task<EfEntityReadAdapter<T>> CreateAsync<T, TContext>(
+        ResourceSchema<T> schema,
+        IDbContextFactory<TContext> database,
+        ReadOperations operations = ReadOperations.All,
+        CancellationToken cancellation = default
+    )
+        where T : class
+        where TContext : DbContext =>
+        EfEntityReadAdapter<T>.RegisterAsync(
+            schema,
+            database,
+            "MySql.EntityFrameworkCore",
+            operations,
+            BeginSnapshot<T>,
+            cancellation
+        );
+
+    public static EfEntityReadAdapter<T> Create<T>(
+        ResourceSchema<T> schema,
+        Func<DbContext> database,
+        ReadOperations operations = ReadOperations.All
+    )
         where T : class =>
-        EfEntityReadAdapter<T>.Register(database, "MySql.EntityFrameworkCore", BeginSnapshot<T>);
+        EfEntityReadAdapter<T>.Register(
+            schema,
+            database,
+            "MySql.EntityFrameworkCore",
+            operations,
+            BeginSnapshot<T>
+        );
 
     static async Task<EfSnapshotTransaction> BeginSnapshot<T>(
         DbContext db,
@@ -39,7 +81,7 @@ public static class MySqlEntityReads
                 StringComparison.OrdinalIgnoreCase
             )
         )
-            throw new NotSupportedException(
+            throw new ProviderUnsupportedException(
                 "MySQL snapshots require a verified InnoDB mapped table."
             );
         var transaction = await connection.BeginTransactionAsync(

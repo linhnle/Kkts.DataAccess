@@ -1,5 +1,100 @@
 # Repository provider acceptance
 
+## Model/provider capabilities
+
+Verified on 2026-10-12 with SDK 10.0.401:
+
+- Focused profile/DI/factory/policy-store/translation/SQLite-snapshot selection:
+  **56 passed**. Covers immutable three-state results and ordered key metadata,
+  declared operations, precise diagnostics, mandatory and inactive-rule checks,
+  subject-context exclusion, multiple targets/cache identity, atomic rejected
+  publication/rollback, exact context disposal, model drift and no-query preflight.
+- Full local regression: **337 passed, 1 intentionally skipped performance test**.
+  SQL Server/MySQL using privately loaded local settings: **61 passed,
+  0 failed, 0 skipped**. Combined: **398 passed, 1 intentionally skipped**.
+  The real-provider suite includes native output/count and converter-dependent
+  predicate execution, plus advertised converter-seek rejection.
+- SQLite EF 10.0.12 exact decimal ordering remains unchanged. Direct query
+  translation verifies native DateTimeOffset ordering/ordered-comparison
+  restrictions without executing SQL. Known unmapped predicates now fail
+  preflight; a genuinely untranslatable composed query still propagates its
+  translation failure with zero SQL and no fallback.
+- Locked solution restore, solution build (**zero warnings/errors**), all
+  changed/new C#/project formatting checks and strict OpenSpec validation pass.
+  Both the neutral custom-adapter example and current single-key resources build.
+  Ordered tuple profile metadata is verified; end-to-end composite execution
+  remains conditional on the separate composite-key implementation.
+- Default and `AbortOnPolicyChange`/`Snapshot` EmployeeApp HTTP acceptance pass
+  on fresh isolated databases, with positive row/duration bounds for snapshots.
+  Save/preview/publication/rollback use the registration's provider profiles;
+  two-tenant authorization, hidden fields, lifecycle conflicts, CSRF, cursor
+  replay rejection and nullable pagination metadata remain compatible. Both
+  hosts were stopped and their database/key artifacts cleaned up.
+
+See [capability scope](provider-capabilities.md) and
+[the breaking helper migration](providers.md) for the distinction between
+metadata validation and arbitrary runtime translation proof. No provider
+collation/type/settings changes or authorization fallback are introduced.
+
+## Dependency injection integration
+
+Verified on 2026-10-12 with SDK 10.0.401:
+
+- Targeted async-context/factory/DI/export/cursor selection: **143 passed**.
+  Coverage includes immutable identity-bound scope/subject acquisition, lazy
+  stamped exports, keyed ambiguity/duplicates and cross-entity key isolation,
+  startup options/model errors and cancellation, no startup identity/policy/data
+  query/provisioning, exact owned-context disposal and pooled reset, and direct
+  synchronous/async-factory facade compatibility.
+- Full local regression: **323 passed, 1 intentionally skipped performance test**.
+  SQL Server/MySQL regressions using private `.env` settings: **59 passed,
+  0 failed, 0 skipped**. Combined: **382 passed, 1 intentionally skipped**.
+- Locked solution restore and solution build pass with **zero build warnings/errors**.
+  CSharpier checks all 42 changed/new integration and prerequisite C#/project
+  files; strict OpenSpec change validation passes.
+- EmployeeApp HTTP acceptance passes on two fresh isolated databases: default
+  export settings and `AbortOnPolicyChange`/`Snapshot` with positive row/duration
+  bounds. Scoped/keyed DI retains two-tenant authorization, hidden fields,
+  absent/inaccessible detail equivalence, CSRF, draft/publish/rollback conflicts,
+  strict coded diagnostics, cursor traversal/replay rejection and nullable
+  pagination metadata. The host still seeds only a draft before publication.
+  Both hosts were stopped and their database/key artifacts cleaned up.
+- Eight library packages pack successfully. A fresh package-only DI/SQLite/
+  Data Protection consumer compiles and runs startup validation, pooled factory
+  ownership, two scoped identities, protected cursor traversal/replay rejection,
+  export and existing direct construction/facade APIs. It verifies core has no
+  DI/ASP.NET assembly reference and the DI package has no EF/ASP.NET reference.
+  Isolated package restore avoids a previously cached release masking changes.
+
+See [the optional DI guide](dependency-injection.md) for factory lifetimes,
+keyed resolution, scope-bound enumeration and startup/runtime boundaries.
+
+## Structured errors
+
+Verified on 2026-10-12 with SDK 10.0.401:
+
+- Solution build: zero warnings/errors; locked restore and changed-file formatting checks pass.
+- Local regression suite: **287 passed, 1 intentionally skipped performance test**.
+- Focused contract/validator/compiler/repository/store/export/HTTP migration run:
+  **155 passed**.
+- Isolated EmployeeApp HTTP acceptance passes two-tenant identity separation,
+  hidden-field denial, absent/inaccessible detail equivalence, lifecycle conflicts,
+  strict JSON, cursor traversal/replay rejection, and pagination metadata.
+  It also checks safe coded conflicts and `/filter/all/1/operator` diagnostics.
+- Core and optional ASP.NET Core packages pack successfully. A fresh package-only
+  consumer compiles/runs registration and error contracts, and confirms core has
+  no ASP.NET assembly dependency.
+- Strict OpenSpec validation passes.
+
+SQL Server/MySQL follow-up on 2026-10-12 loaded `KDA_SQLSERVER_TEST` and
+`KDA_MYSQL_TEST` from the repository's local `.env` without displaying credentials.
+The combined `Provider=SqlServer|Provider=MySql` selection passed **59 tests,
+0 failed, 0 skipped**, including inherited read/projection/seek/export regressions
+and provider-specific snapshot prerequisite checks. Together with the local run
+above, **346 tests passed, with 1 intentionally skipped performance test**.
+The initial broader run lacked exported settings; this follow-up supplies current
+remote-provider evidence rather than relying on the earlier baselines below.
+
 ## Export lifecycle and snapshots
 
 Verification on 2026-10-12, SDK 10.0.401:
@@ -47,9 +142,13 @@ Verification on 2026-10-12, SDK 10.0.401:
   elapsed deadline, cancellation and early disposal release owned resources.
 - Focused real HTTP middleware/SQLite prerequisite follow-up passed **13 tests**,
   including actual SQLite views disguised as table mappings and the unchanged
-  facade/default construction. HTTP failures return safe 409/408 JSON before
+  facade/default construction. At that baseline HTTP failures returned 409/408 JSON before
   start; after start a delivered NDJSON prefix is followed by abnormal termination,
   not an appended error row or successful completion. Prefixes cannot be withdrawn.
+
+The structured-errors migration replaces that earlier status/body contract with
+403/504 Problem Details for policy-change/duration failures; see
+[the current catalog](errors.md). Post-start abort semantics are unchanged.
 
 These results verify ordinary keyed single-table mapped resources, not arbitrary
 views, query hints, external sources or distributed policy/entity snapshots.

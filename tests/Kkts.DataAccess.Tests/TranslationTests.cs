@@ -23,7 +23,7 @@ public class TranslationTests
     }
 
     [Fact]
-    public async Task Relational_translation_failure_aborts_without_fallback()
+    public async Task Known_unmapped_predicate_aborts_preflight_without_fallback()
     {
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".db");
         try
@@ -78,7 +78,7 @@ public class TranslationTests
                 () => new([], [], new Dictionary<string, object?>()),
                 "scope"
             );
-            await Assert.ThrowsAsync<InvalidOperationException>(() => reads.ListAsync(new()));
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(() => reads.ListAsync(new()));
             Assert.Equal(1, opened);
         }
         finally

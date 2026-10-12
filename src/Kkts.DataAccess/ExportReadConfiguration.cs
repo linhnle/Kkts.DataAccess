@@ -48,7 +48,13 @@ public sealed class ExportReadConfiguration
 }
 
 public sealed class ExportPolicyChangedException()
-    : Exception("Export stopped because the active policy changed.");
+    : DataAccessException(
+        DataAccessErrorCode.ExportPolicyChanged,
+        "Export stopped because the active policy changed."
+    );
 
 public sealed class ExportDurationExceededException()
-    : TimeoutException("Export exceeded its maximum elapsed duration.");
+    : DataAccessException(
+        DataAccessErrorCode.ExportDurationExceeded,
+        "Export exceeded its maximum elapsed duration."
+    );

@@ -10,6 +10,150 @@ namespace Kkts.DataAccess.Tests;
 
 public class RepositoryTests
 {
+    internal sealed class AsyncContext(Func<CancellationToken, ValueTask<TrustedContext>> get)
+        : ITrustedContextProvider
+    {
+        public int Captures;
+
+        public ValueTask<TrustedContext> GetAsync(CancellationToken cancellation = default)
+        {
+            Captures++;
+            return get(cancellation);
+        }
+    }
+
+    [Fact]
+    public async Task Async_context_is_awaited_once_per_operation_and_export_is_lazy_and_stable()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter();
+        var current = CompilerTests.Context();
+        var context = new AsyncContext(async token =>
+        {
+            await Task.Yield();
+            token.ThrowIfCancellationRequested();
+            return current;
+        });
+        var repo = new AuthorizedReadRepository<Employee>(
+            CompilerTests.Schema,
+            CompilerTests.Compiler(),
+            source,
+            adapter,
+            context,
+            "scope",
+            new(2, 100, 1),
+            Cursor(),
+            ReadProjectionMode.AllowEntityMaterialization
+        );
+        await repo.ListAsync(new(Limit: 1));
+        await repo.CountAsync(new());
+        await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)));
+        await repo.ListCursorAsync(new(Limit: 1));
+        Assert.Equal(4, context.Captures);
+        await using var export = repo.ExportAsync(new()).GetAsyncEnumerator();
+        Assert.Equal(4, context.Captures);
+        Assert.True(await export.MoveNextAsync());
+        current = CompilerTests.Context(tenant: 2);
+        Assert.True(await export.MoveNextAsync());
+        Assert.Equal(2, Assert.Single(export.Current.Records).GetProperty("Id").GetInt32());
+        Assert.False(await export.MoveNextAsync());
+        Assert.Equal(5, context.Captures);
+        Assert.Equal(5, source.Captures);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Theory]
+    [InlineData("failure")]
+    [InlineData("cancel")]
+    [InlineData("missing")]
+    [InlineData("wrong-type")]
+    [InlineData("null")]
+    public async Task Async_context_failure_or_invalid_identity_opens_no_session(string failure)
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter();
+        using var cancellation = new CancellationTokenSource();
+        var context = new AsyncContext(async token =>
+        {
+            await Task.Yield();
+            if (failure == "failure")
+                throw new InvalidOperationException("acquisition failed");
+            if (failure == "cancel")
+            {
+                cancellation.Cancel();
+                return CompilerTests.Context();
+            }
+            if (failure == "null")
+                return null!;
+            return new(
+                ["manager"],
+                [],
+                new Dictionary<string, object?>
+                {
+                    ["tenant"] = failure == "wrong-type" ? "1" : null,
+                    ["department"] = 10,
+                }
+            );
+        });
+        var repo = new AuthorizedReadRepository<Employee>(
+            CompilerTests.Schema,
+            CompilerTests.Compiler(),
+            source,
+            adapter,
+            context,
+            "scope"
+        );
+        var error = await Record.ExceptionAsync(() => repo.CountAsync(new(), cancellation.Token));
+        Assert.NotNull(error);
+        if (failure == "cancel")
+            Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else if (failure == "failure")
+            Assert.IsType<InvalidOperationException>(error);
+        else
+            Assert.IsType<AuthorizationException>(error);
+        Assert.Equal(1, context.Captures);
+        Assert.Equal(0, adapter.Opened);
+    }
+
+    [Fact]
+    public async Task Async_context_does_not_block_and_shared_compiler_does_not_share_identity()
+    {
+        var adapter = new RecordingAdapter();
+        var source = new Source();
+        var compiler = CompilerTests.Compiler();
+        var pending = new TaskCompletionSource<TrustedContext>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+        var first = new AuthorizedReadRepository<Employee>(
+            CompilerTests.Schema,
+            compiler,
+            source,
+            adapter,
+            new AsyncContext(token => new(pending.Task.WaitAsync(token))),
+            "scope"
+        );
+        var result = first.CountAsync(new());
+        Assert.False(result.IsCompleted);
+        Assert.Equal(0, adapter.Opened);
+        pending.SetResult(CompilerTests.Context());
+        Assert.Equal(2, (await result).Total);
+        var second = new AuthorizedReadRepository<Employee>(
+            CompilerTests.Schema,
+            compiler,
+            source,
+            adapter,
+            new AsyncContext(_ => ValueTask.FromResult(CompilerTests.Context(tenant: 2))),
+            "scope"
+        );
+        Assert.Equal(1, (await second.CountAsync(new())).Total);
+        Assert.Equal(2, (await first.CountAsync(new())).Total);
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            first.CountAsync(new(), canceled.Token)
+        );
+    }
+
     sealed class Source : IActivePolicySource
     {
         public int Captures;
@@ -344,6 +488,161 @@ public class RepositoryTests
         );
 
     [Theory]
+    [InlineData("warm")]
+    [InlineData("cold")]
+    [InlineData("evicted")]
+    public async Task Cursor_cache_paths_preserve_tokens_metadata_authorization_and_version(
+        string path
+    )
+    {
+        foreach (var includeTotal in new[] { false, true })
+        foreach (var includeHasMore in new[] { false, true })
+        {
+            var source = new Source();
+            var adapter = new RecordingAdapter();
+            PolicyCompiler<Employee> NewCompiler() =>
+                new(
+                    CompilerTests.Schema,
+                    CompilerTests.Registry,
+                    CompilerTests.Reference("TenantId", "tenant"),
+                    cacheOptions: new(1)
+                );
+            var compiler = NewCompiler();
+            var config = Cursor(() =>
+            {
+                if (path == "evicted")
+                    compiler.Bind(
+                        source.Current with
+                        {
+                            Version = 2,
+                        },
+                        CompilerTests.Context(tenant: 2),
+                        "scope"
+                    );
+                return "subject";
+            });
+            AuthorizedReadRepository<Employee> CreateRepository() =>
+                new(
+                    CompilerTests.Schema,
+                    compiler,
+                    source,
+                    adapter,
+                    () => CompilerTests.Context(),
+                    "scope",
+                    new(2, 100, 1),
+                    config,
+                    ReadProjectionMode.AllowEntityMaterialization
+                );
+            var first = await CreateRepository()
+                .ListCursorAsync(
+                    new(
+                        Selection: ["Id"],
+                        Limit: 1,
+                        IncludeTotal: includeTotal,
+                        IncludeHasMore: includeHasMore
+                    )
+                );
+            Assert.Equal(1, first.PolicyVersion);
+            Assert.Equal(1, Assert.Single(first.Records).GetProperty("Id").GetInt32());
+            Assert.Equal(includeTotal ? 2L : (long?)null, first.Total);
+            Assert.Equal(includeHasMore ? true : (bool?)null, first.HasMore);
+            Assert.NotNull(first.NextContinuationToken);
+            if (path == "cold")
+                compiler = NewCompiler();
+            else if (path == "evicted")
+                Assert.Equal(new long[] { 2 }, compiler.TemplateInsertionOrder);
+
+            var second = await CreateRepository()
+                .ListCursorAsync(
+                    new(
+                        Selection: ["Id"],
+                        Limit: 1,
+                        ContinuationToken: first.NextContinuationToken,
+                        IncludeTotal: !includeTotal,
+                        IncludeHasMore: !includeHasMore
+                    )
+                );
+            Assert.Equal(1, second.PolicyVersion);
+            Assert.Equal(2, Assert.Single(second.Records).GetProperty("Id").GetInt32());
+            Assert.Equal(!includeTotal ? 2L : (long?)null, second.Total);
+            Assert.Equal(!includeHasMore ? false : (bool?)null, second.HasMore);
+            Assert.Null(second.NextContinuationToken);
+            Assert.Equal(1, adapter.CountCalls);
+            Assert.Equal(2, source.Captures);
+
+            source.Current = source.Current with { Version = 3 };
+            var opened = adapter.Opened;
+            await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+                CreateRepository()
+                    .ListCursorAsync(
+                        new(
+                            Selection: ["Id"],
+                            Limit: 1,
+                            ContinuationToken: first.NextContinuationToken
+                        )
+                    )
+            );
+            Assert.Equal(opened, adapter.Opened);
+            Assert.Equal(adapter.Opened, adapter.Disposed);
+        }
+    }
+
+    [Theory]
+    [InlineData("warm")]
+    [InlineData("cold")]
+    [InlineData("evicted")]
+    public async Task Export_cache_paths_keep_captured_policy_and_context_after_eviction(
+        string path
+    )
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter();
+        var compiler = new PolicyCompiler<Employee>(
+            CompilerTests.Schema,
+            CompilerTests.Registry,
+            CompilerTests.Reference("TenantId", "tenant"),
+            cacheOptions: new(1)
+        );
+        if (path != "cold")
+            compiler.Bind(source.Current, CompilerTests.Context(), "scope");
+        if (path == "evicted")
+            compiler.Bind(source.Current with { Version = 2 }, CompilerTests.Context(), "scope");
+        var trusted = CompilerTests.Context();
+        var repository = new AuthorizedReadRepository<Employee>(
+            CompilerTests.Schema,
+            compiler,
+            source,
+            adapter,
+            () => trusted,
+            "scope",
+            new(2, 100, 1),
+            projectionMode: ReadProjectionMode.AllowEntityMaterialization
+        );
+        await using var export = repository
+            .ExportAsync(new(Selection: ["Id"]))
+            .GetAsyncEnumerator();
+        Assert.True(await export.MoveNextAsync());
+        Assert.Equal(1, export.Current.PolicyVersion);
+        Assert.Equal(1, Assert.Single(export.Current.Records).GetProperty("Id").GetInt32());
+
+        trusted = CompilerTests.Context(tenant: 2);
+        source.Current = CompilerTests.Capture(
+            CompilerTests.Definition(
+                CompilerTests.Rule("new", Effect.Allow, CompilerTests.Leaf("Id", "eq", 3))
+            ),
+            2
+        );
+        compiler.Bind(source.Current, trusted, "scope");
+        Assert.Equal(new long[] { 2 }, compiler.TemplateInsertionOrder);
+        Assert.True(await export.MoveNextAsync());
+        Assert.Equal(1, export.Current.PolicyVersion);
+        Assert.Equal(2, Assert.Single(export.Current.Records).GetProperty("Id").GetInt32());
+        Assert.False(await export.MoveNextAsync());
+        Assert.Equal(1, source.Captures);
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Theory]
     [InlineData(ReadProjectionMode.Required, false, false)]
     [InlineData(ReadProjectionMode.Required, false, true)]
     [InlineData(ReadProjectionMode.Required, true, false)]
@@ -367,11 +666,11 @@ public class RepositoryTests
         var repo = Repository(new Source(), adapter, Cursor(), projectionMode: mode);
         if (!projectedSeek && (mode == ReadProjectionMode.Required || !entitySeek))
         {
-            await Assert.ThrowsAsync<NotSupportedException>(() =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
                 repo.ListCursorAsync(new(Limit: 1))
             );
             await using var export = repo.ExportAsync(new()).GetAsyncEnumerator();
-            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(async () =>
                 await export.MoveNextAsync()
             );
             Assert.Equal(0, adapter.CountCalls);
@@ -453,13 +752,15 @@ public class RepositoryTests
             Cursor(),
             projectionMode: ReadProjectionMode.Required
         );
-        await Assert.ThrowsAsync<NotSupportedException>(() => repo.ListAsync(new(Limit: 1)));
-        await Assert.ThrowsAsync<NotSupportedException>(() =>
+        await Assert.ThrowsAsync<ProviderUnsupportedException>(() => repo.ListAsync(new(Limit: 1)));
+        await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
             repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)))
         );
-        await Assert.ThrowsAsync<NotSupportedException>(() => repo.ListCursorAsync(new(Limit: 1)));
+        await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
+            repo.ListCursorAsync(new(Limit: 1))
+        );
         await using (var export = repo.ExportAsync(new()).GetAsyncEnumerator())
-            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(async () =>
                 await export.MoveNextAsync()
             );
         Assert.Equal(0, adapter.CountCalls);
@@ -470,7 +771,9 @@ public class RepositoryTests
         adapter.SupportsProjection = true;
         await repo.ListAsync(new(Limit: 1));
         var counts = adapter.CountCalls;
-        await Assert.ThrowsAsync<NotSupportedException>(() => repo.ListCursorAsync(new(Limit: 1)));
+        await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
+            repo.ListCursorAsync(new(Limit: 1))
+        );
         Assert.Equal(counts, adapter.CountCalls);
         Assert.Equal(1, adapter.ProjectedPageCalls);
         Assert.Equal(adapter.Opened, adapter.Disposed);
@@ -764,10 +1067,10 @@ public class RepositoryTests
             Cursor(),
             ReadProjectionMode.AllowEntityMaterialization
         );
-        await Assert.ThrowsAsync<AuthorizationException>(() =>
+        await Assert.ThrowsAsync<InvalidRequestException>(() =>
             repo.ListAsync(new(Limit: int.MaxValue, IncludeHasMore: true))
         );
-        await Assert.ThrowsAsync<AuthorizationException>(() =>
+        await Assert.ThrowsAsync<InvalidRequestException>(() =>
             repo.ListCursorAsync(new(Limit: int.MaxValue, IncludeTotal: false))
         );
         Assert.Equal(0, adapter.Opened);
@@ -923,13 +1226,15 @@ public class RepositoryTests
         Assert.Equal(0, adapter.Opened);
         var repo = Repository(source, adapter, Cursor());
         foreach (var limit in new[] { 0, -1, 3 })
-            await Assert.ThrowsAsync<AuthorizationException>(() =>
+            await Assert.ThrowsAsync<InvalidRequestException>(() =>
                 repo.ListCursorAsync(new(Limit: limit))
             );
         Assert.Equal(0, adapter.Opened);
-        await Assert.ThrowsAsync<NotSupportedException>(() => repo.ListCursorAsync(new(Limit: 1)));
+        await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
+            repo.ListCursorAsync(new(Limit: 1))
+        );
         await using (var export = repo.ExportAsync(new()).GetAsyncEnumerator())
-            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(async () =>
                 await export.MoveNextAsync()
             );
         Assert.Equal(0, adapter.CountCalls);
@@ -1130,17 +1435,23 @@ public class RepositoryTests
             var request in new[]
             {
                 new ListReadRequest(Selection: ["Salary"], Limit: 1),
-                new ListReadRequest(Selection: ["Manager.Id"], Limit: 1),
                 new ListReadRequest(Filter: CompilerTests.Leaf("Salary", "eq", 100), Limit: 1),
-                new ListReadRequest(Filter: CompilerTests.Reference("Status", "tenant"), Limit: 1),
                 new ListReadRequest(Sort: [new("Id")], Limit: 1),
+            }
+        )
+            await Assert.ThrowsAsync<AuthorizationException>(() => repo.ListAsync(request));
+        foreach (
+            var request in new[]
+            {
+                new ListReadRequest(Selection: ["Manager.Id"], Limit: 1),
+                new ListReadRequest(Filter: CompilerTests.Reference("Status", "tenant"), Limit: 1),
                 new ListReadRequest(Limit: 0),
                 new ListReadRequest(Limit: 3),
                 new ListReadRequest(Offset: -1, Limit: 1),
                 new ListReadRequest(Offset: 101, Limit: 1),
             }
         )
-            await Assert.ThrowsAsync<AuthorizationException>(() => repo.ListAsync(request));
+            await Assert.ThrowsAsync<InvalidRequestException>(() => repo.ListAsync(request));
         await Assert.ThrowsAsync<AuthorizationException>(() =>
             repo.CountAsync(new(CompilerTests.Leaf("Salary", "eq", 100)))
         );
@@ -1154,7 +1465,7 @@ public class RepositoryTests
                 JsonSerializer.SerializeToElement(new { Id = 1 }),
             }
         )
-            await Assert.ThrowsAsync<AuthorizationException>(() => repo.DetailAsync(new(key)));
+            await Assert.ThrowsAsync<InvalidRequestException>(() => repo.DetailAsync(new(key)));
         var validKey = JsonSerializer.SerializeToElement(1);
         await Assert.ThrowsAsync<AuthorizationException>(() =>
             repo.DetailAsync(new(validKey, Selection: ["Salary"]))
@@ -1176,6 +1487,44 @@ public class RepositoryTests
                 await export.MoveNextAsync()
             );
         }
+        Assert.Equal(0, adapter.Opened);
+    }
+
+    [Fact]
+    public async Task Request_diagnostics_locate_filter_selection_sort_and_key_before_entity_access()
+    {
+        var adapter = new RecordingAdapter();
+        var repo = Repository(new Source(), adapter);
+        var filter = await Assert.ThrowsAsync<InvalidRequestException>(() =>
+            repo.CountAsync(
+                new(
+                    new Condition
+                    {
+                        All =
+                        [
+                            CompilerTests.Leaf("Status", "eq", "Active"),
+                            CompilerTests.Leaf("Status", "bad operator sentinel", "value sentinel"),
+                        ],
+                    }
+                )
+            )
+        );
+        Assert.Equal(DataAccessErrorCode.InvalidOperator, Assert.Single(filter.Diagnostics).Code);
+        Assert.Equal("/filter/all/1/operator", filter.Diagnostics[0].Path);
+        var selection = await Assert.ThrowsAsync<InvalidRequestException>(() =>
+            repo.ListAsync(new(Selection: ["Name", "unknown sentinel"], Limit: 1))
+        );
+        Assert.Equal("/selection/1", Assert.Single(selection.Diagnostics).Path);
+        var sort = await Assert.ThrowsAsync<InvalidRequestException>(() =>
+            repo.ListAsync(new(Sort: [new("Name"), new("unknown sentinel")], Limit: 1))
+        );
+        Assert.Equal("/sort/1/field", Assert.Single(sort.Diagnostics).Path);
+        var key = await Assert.ThrowsAsync<InvalidRequestException>(() =>
+            repo.DetailAsync(new(JsonSerializer.SerializeToElement("key sentinel")))
+        );
+        Assert.Equal("/key", Assert.Single(key.Diagnostics).Path);
+        foreach (var error in new[] { filter, selection, sort, key })
+            Assert.DoesNotContain("sentinel", JsonSerializer.Serialize(error.Diagnostics));
         Assert.Equal(0, adapter.Opened);
     }
 
@@ -1226,7 +1575,7 @@ public class RepositoryTests
         Assert.Equal(2, exported.Count);
         Assert.All(exported, row => Assert.Equal("{}", row.GetRawText()));
         Assert.Equal(adapter.Opened, adapter.Disposed);
-        await Assert.ThrowsAsync<AuthorizationException>(() => repo.ListAsync(new()));
+        await Assert.ThrowsAsync<InvalidRequestException>(() => repo.ListAsync(new()));
     }
 
     [Fact]
@@ -1336,7 +1685,7 @@ public class RepositoryTests
         var adapter = new RecordingAdapter();
         var repo = Repository(source, adapter);
         await Assert.ThrowsAsync<AuthorizationException>(() =>
-            repo.ListAsync(new(Selection: ["Salary"]))
+            repo.ListAsync(new(Selection: ["Salary"], Limit: 1))
         );
         Assert.Equal(0, adapter.Opened);
         var page = await repo.ListAsync(new(Sort: [new("Name")], Limit: 1));
@@ -1397,17 +1746,21 @@ public class RepositoryTests
     public void Registration_rejects_mismatch_before_querying()
     {
         Assert.Throws<InvalidOperationException>(() =>
-            Kkts.DataAccess.SqlServer.SqlServerEntityReads.Create<Employee>(() =>
-                new DbContext(
-                    new DbContextOptionsBuilder().UseSqlite("Data Source=:memory:").Options
-                )
+            Kkts.DataAccess.SqlServer.SqlServerEntityReads.Create<Employee>(
+                CompilerTests.Schema,
+                () =>
+                    new DbContext(
+                        new DbContextOptionsBuilder().UseSqlite("Data Source=:memory:").Options
+                    )
             )
         );
         Assert.Throws<InvalidOperationException>(() =>
-            Kkts.DataAccess.MySql.MySqlEntityReads.Create<Employee>(() =>
-                new DbContext(
-                    new DbContextOptionsBuilder().UseSqlite("Data Source=:memory:").Options
-                )
+            Kkts.DataAccess.MySql.MySqlEntityReads.Create<Employee>(
+                CompilerTests.Schema,
+                () =>
+                    new DbContext(
+                        new DbContextOptionsBuilder().UseSqlite("Data Source=:memory:").Options
+                    )
             )
         );
     }

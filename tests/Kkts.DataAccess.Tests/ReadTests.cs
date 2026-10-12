@@ -73,6 +73,87 @@ public class ReadTests : IAsyncLifetime
 
     protected virtual string ProviderName => "Microsoft.EntityFrameworkCore.Sqlite";
 
+    [Fact]
+    public async Task Provider_profiles_validate_native_output_count_and_reject_advertised_converter_seek()
+    {
+        var schema = ProviderCapabilityTests.Schema(convertedSort: true);
+        var contexts = new List<Database>();
+        var adapter = ProviderCapabilityTests.Register(
+            schema,
+            () =>
+            {
+                var context = new Database(Options);
+                contexts.Add(context);
+                return context;
+            },
+            ProviderName,
+            ReadOperations.Count
+        );
+        var profile = Assert.IsType<ReadProviderCapabilities>(adapter.Capabilities);
+        Assert.Equal(
+            CapabilityStatus.Supported,
+            profile.CheckField("Converted", ProviderFieldUse.Output).Status
+        );
+        Assert.Equal(
+            CapabilityStatus.Unsupported,
+            profile.CheckField("Converted", ProviderFieldUse.SeekOrder).Status
+        );
+        Assert.Equal(CapabilityStatus.Unverified, profile.ComposedQuery.Status);
+        var failure = Assert.Throws<ProviderUnsupportedException>(() =>
+            ProviderCapabilityTests.Register(
+                schema,
+                () => new Database(Options),
+                ProviderName,
+                ReadOperations.Cursor
+            )
+        );
+        Assert.Contains(
+            failure.Diagnostics,
+            diagnostic => diagnostic.Path == "/operations/seek/fields/Converted"
+        );
+        await using (var setup = new Database(Options))
+        {
+            setup.Add(
+                new Boundary
+                {
+                    Id = 501,
+                    TenantId = 1,
+                    Text = "capability",
+                    Converted = 7,
+                }
+            );
+            setup.Add(
+                new Boundary
+                {
+                    Id = 502,
+                    TenantId = 2,
+                    Text = "hidden",
+                    Converted = 7,
+                }
+            );
+            await setup.SaveChangesAsync();
+        }
+        var registry = new ContextRegistry(
+            new Dictionary<string, Type> { ["tenant"] = typeof(int) }
+        );
+        var policy = ProviderCapabilityTests.Policy(CompilerTests.Leaf("Converted", "eq", 7));
+        var repository = new AuthorizedReadRepository<Boundary>(
+            schema,
+            new(
+                schema,
+                registry,
+                CompilerTests.Reference("TenantId", "tenant"),
+                capabilities: [profile]
+            ),
+            new PolicySource(new("scope", schema.Resource, "1", 1, PolicyJson.Serialize(policy))),
+            adapter,
+            () => CompilerTests.Context(),
+            "scope"
+        );
+        Assert.Equal(1, (await repository.CountAsync(new())).Total);
+        Assert.True(contexts[^1].Disposed);
+    }
+
     AuthorizedReadRepository<CompilerTests.Employee> Reads() =>
         new(
             CompilerTests.Schema,
@@ -370,7 +451,7 @@ public class ReadTests : IAsyncLifetime
                 "Expected the provider's exact count aggregate."
             );
             var executed = commands.Sql.Count;
-            await Assert.ThrowsAsync<NotSupportedException>(() =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
                 repo.ListAsync(new(Selection: ["unmapped"], IncludeTotal: false))
             );
             Assert.Equal(executed, commands.Sql.Count);
@@ -594,7 +675,10 @@ public class ReadTests : IAsyncLifetime
                 json,
                 new JsonSerializerOptions(JsonSerializerDefaults.Web)
             )!;
-            await Assert.ThrowsAsync<AuthorizationException>(() => reads.DetailAsync(request));
+            var error = await Assert.ThrowsAsync<InvalidRequestException>(() =>
+                reads.DetailAsync(request)
+            );
+            Assert.Equal("/key", Assert.Single(error.Diagnostics).Path);
         }
         var key = JsonSerializer.SerializeToElement(1);
         var present = await reads.DetailAsync(
@@ -644,11 +728,17 @@ public class ReadTests : IAsyncLifetime
                 new ListReadRequest(Selection: ["Salary"]),
                 new ListReadRequest(Filter: CompilerTests.Leaf("Salary", "eq", 100)),
                 new ListReadRequest(Sort: [new("Id")]),
-                new ListReadRequest(Selection: ["Manager.Id"]),
-                new ListReadRequest(Limit: 0),
             }
         )
             await Assert.ThrowsAsync<AuthorizationException>(() => reads.ListAsync(request));
+        var unknown = await Assert.ThrowsAsync<InvalidRequestException>(() =>
+            reads.ListAsync(new(Selection: ["Manager.Id"]))
+        );
+        Assert.Equal("/selection/0", Assert.Single(unknown.Diagnostics).Path);
+        var pagination = await Assert.ThrowsAsync<InvalidRequestException>(() =>
+            reads.ListAsync(new(Limit: 0))
+        );
+        Assert.Equal("/limit", Assert.Single(pagination.Diagnostics).Path);
     }
 
     [Fact]
@@ -886,7 +976,7 @@ public class ReadTests : IAsyncLifetime
             () => CompilerTests.Context(),
             "scope"
         );
-        await Assert.ThrowsAsync<InvalidOperationException>(() => failed.ListAsync(new()));
+        await Assert.ThrowsAsync<ProviderUnsupportedException>(() => failed.ListAsync(new()));
     }
 
     [Fact]
@@ -1342,7 +1432,7 @@ public class ReadTests : IAsyncLifetime
                 row => row.TenantId == 1,
                 [new(typeof(Boundary).GetProperty("Computed")!, false)]
             );
-            await Assert.ThrowsAsync<NotSupportedException>(() =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
                 seek.SeekAsync(new(unmapped, null), 1, CancellationToken.None)
             );
             foreach (var name in new[] { "Floating", "Converted" })
@@ -1352,7 +1442,7 @@ public class ReadTests : IAsyncLifetime
                     [new(typeof(Boundary).GetProperty(name)!, false)]
                 );
                 var queries = commands.Sql.Count;
-                await Assert.ThrowsAsync<NotSupportedException>(() =>
+                await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
                     seek.SeekAsync(new(unsupported, null), 1, CancellationToken.None)
                 );
                 Assert.Equal(queries, commands.Sql.Count);
@@ -1471,11 +1561,21 @@ public class ReadTests : IAsyncLifetime
         ProviderName switch
         {
             "Microsoft.EntityFrameworkCore.Sqlite" =>
-                SqliteEntityReads.Create<CompilerTests.Employee>(factory),
+                SqliteEntityReads.Create<CompilerTests.Employee>(
+                    CompilerTests.Schema,
+                    factory,
+                    ReadOperations.All | ReadOperations.Snapshot
+                ),
             "Microsoft.EntityFrameworkCore.SqlServer" =>
-                SqlServer.SqlServerEntityReads.Create<CompilerTests.Employee>(factory),
+                SqlServer.SqlServerEntityReads.Create<CompilerTests.Employee>(
+                    CompilerTests.Schema,
+                    factory,
+                    ReadOperations.All | ReadOperations.Snapshot
+                ),
             "MySql.EntityFrameworkCore" => MySql.MySqlEntityReads.Create<CompilerTests.Employee>(
-                factory
+                CompilerTests.Schema,
+                factory,
+                ReadOperations.All | ReadOperations.Snapshot
             ),
             _ => throw new NotSupportedException("Unknown snapshot provider."),
         };

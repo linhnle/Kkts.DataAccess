@@ -6,6 +6,58 @@ namespace Kkts.DataAccess.Tests;
 
 public class ExportLifecycleTests
 {
+    [Theory]
+    [InlineData(ExportPolicyConsistency.CapturedPolicy)]
+    [InlineData(ExportPolicyConsistency.AbortOnPolicyChange)]
+    public async Task Async_export_capture_is_lazy_awaited_and_retained_independently_of_activation(
+        ExportPolicyConsistency consistency
+    )
+    {
+        var source = new Source();
+        var adapter = new Adapter();
+        var identity = CompilerTests.Context();
+        var pending = new TaskCompletionSource<TrustedContext>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+        var context = new RepositoryTests.AsyncContext(token => new(pending.Task.WaitAsync(token)));
+        var repo = new AuthorizedReadRepository<Employee>(
+            CompilerTests.Schema,
+            CompilerTests.Compiler(),
+            source,
+            adapter,
+            context,
+            "scope",
+            new(2, 100, 1),
+            export: new(policyConsistency: consistency)
+        );
+        await using var export = repo.ExportAsync(new()).GetAsyncEnumerator();
+        Assert.Equal(0, context.Captures);
+        var move = export.MoveNextAsync().AsTask();
+        Assert.False(move.IsCompleted);
+        Assert.Equal(0, adapter.Opened);
+        pending.SetResult(identity);
+        Assert.True(await move);
+        identity = CompilerTests.Context(tenant: 2);
+        pending = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        pending.SetResult(identity);
+        Assert.True(await export.MoveNextAsync());
+        Assert.Equal(2, Assert.Single(export.Current.Records).GetProperty("Id").GetInt32());
+        Assert.Equal(1, context.Captures);
+        if (consistency == ExportPolicyConsistency.AbortOnPolicyChange)
+        {
+            source.Revision++;
+            await Assert.ThrowsAsync<ExportPolicyChangedException>(() =>
+                export.MoveNextAsync().AsTask()
+            );
+            Assert.Equal(1, source.StampedCaptures);
+        }
+        else
+        {
+            Assert.True(await export.MoveNextAsync());
+            Assert.Equal(1, source.Captures);
+        }
+    }
+
     sealed class Source : IActivationAwarePolicySource
     {
         public CapturedPolicy Policy = CompilerTests.Capture(
@@ -395,7 +447,7 @@ public class ExportLifecycleTests
                 source.NullStamp = true;
                 break;
             case "missing":
-                expected = new AuthorizationException("No active policy.");
+                expected = new PolicyMissingException();
                 source.OnCapture = _ => throw expected;
                 break;
             case "failure":
@@ -426,7 +478,7 @@ public class ExportLifecycleTests
                 .ExportAsync(new())
                 .GetAsyncEnumerator()
         )
-            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(async () =>
                 await iterator.MoveNextAsync()
             );
         Assert.Equal(0, adapter.Opened);
@@ -439,7 +491,7 @@ public class ExportLifecycleTests
                 .ExportAsync(new())
                 .GetAsyncEnumerator()
         )
-            await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(async () =>
                 await iterator.MoveNextAsync()
             );
         Assert.Empty(adapter.Limits);

@@ -609,7 +609,9 @@
       "employeeapp": {
         "type": "Project",
         "dependencies": {
+          "Kkts.DataAccess.AspNetCore": "[0.1.0, )",
           "Kkts.DataAccess.DataProtection": "[0.1.0, )",
+          "Kkts.DataAccess.DependencyInjection": "[0.1.0, )",
           "Kkts.DataAccess.MySql": "[0.1.0, )",
           "Kkts.DataAccess.SqlServer": "[0.1.0, )",
           "Kkts.DataAccess.Sqlite": "[0.1.0, )"
@@ -622,11 +624,26 @@
           "Kkts.Expressions": "[3.1.0, )"
         }
       },
+      "kkts.dataaccess.aspnetcore": {
+        "type": "Project",
+        "dependencies": {
+          "Kkts.DataAccess": "[0.1.0, )"
+        }
+      },
       "kkts.dataaccess.dataprotection": {
         "type": "Project",
         "dependencies": {
           "Kkts.DataAccess": "[0.1.0, )",
           "Microsoft.AspNetCore.DataProtection.Extensions": "[10.0.12, )"
+        }
+      },
+      "kkts.dataaccess.dependencyinjection": {
+        "type": "Project",
+        "dependencies": {
+          "Kkts.DataAccess": "[0.1.0, )",
+          "Microsoft.Extensions.DependencyInjection": "[10.0.0, )",
+          "Microsoft.Extensions.Hosting.Abstractions": "[10.0.0, )",
+          "Microsoft.Extensions.Options": "[10.0.0, )"
         }
       },
       "kkts.dataaccess.entityframeworkcore": {

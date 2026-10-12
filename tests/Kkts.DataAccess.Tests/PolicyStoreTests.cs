@@ -87,7 +87,7 @@ public class PolicyStoreTests : IDisposable
     {
         var store = Store;
         await store.InitializeAsync();
-        await Assert.ThrowsAsync<AuthorizationException>(() =>
+        await Assert.ThrowsAsync<PolicyMissingException>(() =>
             store.ReadActivationAsync("scope", "Employee")
         );
         await store.SaveDraftAsync(admin, "scope", "Employee", Payload, 0);
@@ -221,7 +221,7 @@ public class PolicyStoreTests : IDisposable
     {
         var store = Store;
         await store.InitializeAsync();
-        await Assert.ThrowsAsync<AuthorizationException>(() =>
+        await Assert.ThrowsAsync<PolicyMissingException>(() =>
             store.CaptureAsync("scope", "Employee")
         );
         await Assert.ThrowsAsync<AuthorizationException>(() =>
@@ -246,7 +246,7 @@ public class PolicyStoreTests : IDisposable
         var captured = await Store.CaptureAsync("scope", "Employee");
         Assert.Equal(version, captured.Version);
         Assert.Null((await store.ReadDraftAsync(admin, "scope", "Other")).Payload);
-        await Assert.ThrowsAsync<AuthorizationException>(() =>
+        await Assert.ThrowsAsync<PolicyMissingException>(() =>
             store.CaptureAsync("other", "Employee")
         );
         await store.SaveDraftAsync(admin, "scope", "Employee", Payload, 1);
@@ -320,7 +320,7 @@ public class PolicyStoreTests : IDisposable
             CompilerTests.Schema.Fields.Values,
             "Id"
         );
-        await Assert.ThrowsAsync<AuthorizationException>(() =>
+        await Assert.ThrowsAsync<SchemaIncompatibleException>(() =>
             store.RollbackAsync(admin, "scope", incompatible, CompilerTests.Registry, version, 1)
         );
         Assert.Equal(version, (await store.CaptureAsync("scope", "Employee")).Version);
@@ -359,7 +359,7 @@ public class PolicyStoreTests : IDisposable
             )
         );
         await store.SaveDraftAsync(admin, "scope", "Employee", invalid, 1);
-        await Assert.ThrowsAsync<AuthorizationException>(() =>
+        await Assert.ThrowsAsync<InvalidRequestException>(() =>
             store.PublishAsync(admin, "scope", CompilerTests.Schema, CompilerTests.Registry, 2, 1)
         );
         Assert.Equal(version, (await store.CaptureAsync("scope", "Employee")).Version);

@@ -14,6 +14,33 @@ The host registers context keys/types, builds a fresh `TrustedContext` from auth
 
 Record composition is `mandatory AND (OR allows) AND NOT (OR denies)`. No applicable Allow fails before provider execution. Fields are `(union applicable allows minus union applicable denies) intersect eligibility`, independently for each operation. A record grant adds no fields. A field grant adds no records.
 
-Default configurable limits: depth 12, total nodes 256, literal/context string bytes 4096, collection size 100 and total entries 100. Diagnostics include condition paths. Limits are enforced before predicate construction. Plans are keyed by scope/resource/schema/policy/compiler version; identity is bound outside the cache. Version content is immutable and changing a payload under the same version is rejected.
+Default configurable limits: depth 12, total nodes 256, literal/context string bytes 4096, collection size 100 and total entries 100. Diagnostics include condition paths. Limits are enforced before predicate construction.
+
+## Bounded compiler templates
+
+Each `PolicyCompiler<T>` retains up to 128 privately owned validated templates by
+default. Supply `cacheOptions: new PolicyCompilerCacheOptions(MaxEntries: 32)` to
+configure a positive entry capacity; zero and negative values are rejected.
+Existing constructor calls keep the default. Templates are keyed by
+scope/resource/schema/policy/compiler version and provider validation identity.
+Request identity, grants, predicates and records are never cached: every bind
+derives fresh authorization from its trusted context.
+
+Lookup, validation and insertion are serialized under a compiler-local lock;
+request binding occurs outside it. Eviction is FIFO by successful insertion,
+and hits do not reorder entries. Invalid builds neither enter the cache nor
+evict healthy templates. The dictionary and insertion queue are both bounded;
+there is no historical content ledger or permanent per-version lock/task state.
+
+A resident version supplied with different raw payload content fails with
+`RevisionConflictException`. An evicted version is parsed and validated again.
+Lifetime version/content immutability must be enforced by the authoritative
+policy source (the SQLite store uses immutable-version triggers), not by the
+compiler's bounded history. Custom sources must enforce the same contract.
+
+In-flight operations can retain validated AST/content references after eviction.
+The entry capacity bounds compiler-owned retention, not total process memory
+or exact bytes; policy transport/complexity limits remain separate. Eviction
+does not change already-bound authorization or an operation's captured version.
 
 The normalized Employee rule is a manager Allow with `all` containing DepartmentId eq context department and Status eq literal Active. A separate manager field entry grants Select Id/Name (add Email when registered), with Filter DepartmentId/Status and Sort Name explicitly granted separately. The host mandatory constraint is TenantId eq context tenant. `CompilerTests` verifies this composition and field separation. Kkts.Expressions supplies structured predicate construction, metadata-only semantic analysis, and typed And/Or composition through an internal adapter. DataAccess retains authorization, strict conversion, eager trusted-context binding, and explicit null behavior. See [dependency integration](dependencies.md) for the upstream APIs and compatibility adaptations.

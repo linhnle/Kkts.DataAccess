@@ -13,10 +13,6 @@ public enum FieldOperation
     Write,
 }
 
-public sealed record Diagnostic(string Path, string Message);
-
-public sealed class AuthorizationException(string message) : Exception(message);
-
 public sealed record AdministrationContext(string Actor, string Scope, bool IsAdministrator)
 {
     public void Demand(string scope)
@@ -116,9 +112,11 @@ public sealed class ResourceSchema<T>
     }
 
     public ResourceField Resolve(string name) =>
-        Fields.TryGetValue(name, out var field)
+        name != null && Fields.TryGetValue(name, out var field)
             ? field
-            : throw new AuthorizationException($"Unknown public field '{name}'.");
+            : throw new InvalidRequestException(
+                diagnostics: [new(DataAccessErrorCode.UnknownField, "", "Unknown public field.")]
+            );
 
     public SchemaMetadata Metadata(AdministrationContext admin, string scope)
     {

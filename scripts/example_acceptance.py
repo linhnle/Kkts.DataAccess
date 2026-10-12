@@ -39,7 +39,8 @@ status,result=request(admin,'/admin/preview',preview_fields);assert status==200
 preview=json.loads(result);assert preview['label']=='Synthetic fixtures only'
 assert sum(r['allowed'] for r in preview['records'])==2
 assert 'manager-active-department' in preview['applicableRules']
-assert request(admin,'/admin/save',dict(preview_fields,draftRevision='0'))[0]==409
+status,result=request(admin,'/admin/save',dict(preview_fields,draftRevision='0'));assert status==409
+assert json.loads(result)['code']=='revision_conflict'
 status,page=request(admin,'/admin/save',dict(preview_fields,draftRevision='1'));assert status==200
 csrf=token(page)
 assert request(admin,'/admin/publish',{'__RequestVerificationToken':csrf,'draftRevision':'1','activeRevision':'1'})[0]==409
@@ -98,7 +99,14 @@ for endpoint in ['/employees/list','/employees/cursor']:
 status,result=post_json('/employees/export',{});assert status==200
 assert len(result.strip().splitlines())==2
 assert all(set(json.loads(line))=={'Id','Name','Email'} for line in result.strip().splitlines())
-assert post_json('/employees/count',{'filter':{'field':'Salary','operator':'eq','literal':100}})[0]==403
+status,result=post_json('/employees/count',{'filter':{'field':'Salary','operator':'eq','literal':100}})
+assert status==403 and json.loads(result)['code']=='access_denied'
+status,result=post_json('/employees/count',{'filter':{'all':[{'field':'Status','operator':'eq','literal':'Active'},{'field':'Status','operator':'bad sentinel','literal':'private sentinel'}]}})
+assert status==400
+problem=json.loads(result)
+assert problem['code']=='invalid_request' and problem['diagnostics'][0]['code']=='invalid_operator'
+assert problem['diagnostics'][0]['path']=='/filter/all/1/operator'
+assert 'sentinel' not in result
 cursor_query={'selection':['Name'],'sort':[{'field':'Name'}],'limit':1}
 status,result=post_json('/employees/cursor',cursor_query);assert status==200
 first=json.loads(result);assert first['total']==2 and len(first['records'])==1

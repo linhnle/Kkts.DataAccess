@@ -1,8 +1,10 @@
 <Solution>
     <Folder Name="/src/">
+        <Project Path="src/Kkts.DataAccess.AspNetCore/Kkts.DataAccess.AspNetCore.csproj" />
         <Project Path="src/Kkts.DataAccess.DataProtection/Kkts.DataAccess.DataProtection.csproj" />
         <Project Path="src/Kkts.DataAccess.SqlServer/Kkts.DataAccess.SqlServer.csproj" />
         <Project Path="src/Kkts.DataAccess.MySql/Kkts.DataAccess.MySql.csproj" />
+        <Project Path="src/Kkts.DataAccess.DependencyInjection/Kkts.DataAccess.DependencyInjection.csproj" />
         <Project Path="src/Kkts.DataAccess.EntityFrameworkCore/Kkts.DataAccess.EntityFrameworkCore.csproj" />
         <Project Path="src/Kkts.DataAccess/Kkts.DataAccess.csproj" />
         <Project Path="src/Kkts.DataAccess.Sqlite/Kkts.DataAccess.Sqlite.csproj" />

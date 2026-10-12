@@ -12,8 +12,8 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
     readonly PolicyCompiler<T> compiler;
     readonly IActivePolicySource store;
     readonly IEntityReadAdapter<T> database;
-    readonly Func<TrustedContext> context;
-    readonly string scope;
+    readonly ITrustedContextProvider context;
+    readonly Func<TrustedContext, string> scope;
     readonly ReadLimits limits;
     readonly CursorReadConfiguration? cursor;
     readonly ReadProjectionMode projectionMode;
@@ -31,13 +31,63 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         ReadProjectionMode projectionMode = ReadProjectionMode.Required,
         ExportReadConfiguration? export = null
     )
+        : this(
+            schema,
+            compiler,
+            store,
+            database,
+            new SynchronousTrustedContextProvider(context),
+            scope,
+            limits,
+            cursor,
+            projectionMode,
+            export
+        ) { }
+
+    public AuthorizedReadRepository(
+        ResourceSchema<T> schema,
+        PolicyCompiler<T> compiler,
+        IActivePolicySource store,
+        IEntityReadAdapter<T> database,
+        ITrustedContextProvider context,
+        string scope,
+        ReadLimits? limits = null,
+        CursorReadConfiguration? cursor = null,
+        ReadProjectionMode projectionMode = ReadProjectionMode.Required,
+        ExportReadConfiguration? export = null
+    )
+        : this(
+            schema,
+            compiler,
+            store,
+            database,
+            context,
+            _ => scope,
+            limits,
+            cursor,
+            projectionMode,
+            export
+        ) { }
+
+    public AuthorizedReadRepository(
+        ResourceSchema<T> schema,
+        PolicyCompiler<T> compiler,
+        IActivePolicySource store,
+        IEntityReadAdapter<T> database,
+        ITrustedContextProvider context,
+        Func<TrustedContext, string> scope,
+        ReadLimits? limits = null,
+        CursorReadConfiguration? cursor = null,
+        ReadProjectionMode projectionMode = ReadProjectionMode.Required,
+        ExportReadConfiguration? export = null
+    )
     {
         this.schema = schema;
         this.compiler = compiler;
         this.store = store;
         this.database = database;
-        this.context = context;
-        this.scope = scope;
+        this.context = context ?? throw new ArgumentNullException(nameof(context));
+        this.scope = scope ?? throw new ArgumentNullException(nameof(scope));
         this.limits = limits ?? new();
         this.cursor = cursor;
         this.export = export ?? new();
@@ -53,11 +103,26 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             throw new ArgumentException("Invalid read limits.");
     }
 
-    async Task<(BoundPolicy<T> Bound, TrustedContext Context)> Capture(CancellationToken token)
+    async Task<(BoundPolicy<T> Bound, TrustedContext Context, string Scope)> Capture(
+        CancellationToken token
+    )
     {
-        var trusted = context();
-        var captured = await store.CaptureAsync(scope, schema.Resource, token);
-        return (compiler.Bind(captured, trusted, scope, "Read"), trusted);
+        var trusted = await CaptureContext(token);
+        var capturedScope = scope(trusted);
+        var captured = await store.CaptureAsync(capturedScope, schema.Resource, token);
+        token.ThrowIfCancellationRequested();
+        return (compiler.Bind(captured, trusted, capturedScope, "Read"), trusted, capturedScope);
+    }
+
+    async Task<TrustedContext> CaptureContext(CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var trusted = await context.GetAsync(token);
+        token.ThrowIfCancellationRequested();
+        return trusted
+            ?? throw new AuthorizationException(
+                "Trusted context acquisition returned no identity."
+            );
     }
 
     void ValidatePagination(ListReadRequest request)
@@ -68,34 +133,101 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             || request.Offset < 0
             || request.Offset > limits.MaxOffset
         )
-            throw new AuthorizationException("Pagination limit exceeded.");
+            throw new InvalidRequestException(
+                "Pagination limit exceeded.",
+                [
+                    new(
+                        DataAccessErrorCode.InvalidRequest,
+                        request.Limit < 1 || request.Limit > limits.MaxPageSize
+                            ? "/limit"
+                            : "/offset",
+                        "Pagination limit exceeded."
+                    ),
+                ]
+            );
     }
 
-    void Demand(string field, FieldOperation operation, BoundPolicy<T> bound)
+    void Demand(string field, FieldOperation operation, BoundPolicy<T> bound, string path)
     {
-        var registered = schema.Resolve(field);
+        if (field == null || !schema.Fields.TryGetValue(field, out var registered))
+            throw new InvalidRequestException(
+                diagnostics: [new(DataAccessErrorCode.UnknownField, path, "Unknown public field.")]
+            );
         if (!registered.Eligibility.Contains(operation) || !bound.Fields[operation].Contains(field))
-            throw new AuthorizationException($"Field '{field}' is forbidden for {operation}.");
+            throw new AuthorizationException("The requested field operation is forbidden.");
     }
 
     string[] ValidateSelection(string[]? requested, BoundPolicy<T> bound)
     {
         if ((requested?.Length ?? 0) > schema.Fields.Count)
-            throw new AuthorizationException("Too many field references.");
+            throw new InvalidRequestException(
+                diagnostics:
+                [
+                    new(
+                        DataAccessErrorCode.ComplexityExceeded,
+                        "/selection",
+                        "Too many field references."
+                    ),
+                ]
+            );
         var selection = (requested ?? bound.Fields[FieldOperation.Select].Order().ToArray())
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        foreach (var name in selection)
-            Demand(name, FieldOperation.Select, bound);
+        for (var index = 0; index < selection.Length; index++)
+            Demand(
+                selection[index],
+                FieldOperation.Select,
+                bound,
+                JsonPointer.Append(
+                    "/selection",
+                    Array
+                        .IndexOf(requested ?? selection, selection[index])
+                        .ToString(System.Globalization.CultureInfo.InvariantCulture)
+                )
+            );
         return selection;
     }
 
     void ValidateSort(SortField[]? requested, BoundPolicy<T> bound)
     {
         if ((requested?.Length ?? 0) > schema.Fields.Count)
-            throw new AuthorizationException("Too many field references.");
-        foreach (var sort in requested ?? [])
-            Demand(sort.Field, FieldOperation.Sort, bound);
+            throw new InvalidRequestException(
+                diagnostics:
+                [
+                    new(
+                        DataAccessErrorCode.ComplexityExceeded,
+                        "/sort",
+                        "Too many field references."
+                    ),
+                ]
+            );
+        for (var index = 0; index < (requested?.Length ?? 0); index++)
+        {
+            if (requested![index] == null)
+                throw new InvalidRequestException(
+                    diagnostics:
+                    [
+                        new(
+                            DataAccessErrorCode.InvalidRequest,
+                            JsonPointer.Append(
+                                "/sort",
+                                index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            ),
+                            "Sort entry required."
+                        ),
+                    ]
+                );
+            Demand(
+                requested![index].Field,
+                FieldOperation.Sort,
+                bound,
+                JsonPointer.Append(
+                    "/sort",
+                    index.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    "field"
+                )
+            );
+        }
     }
 
     Expression<Func<T, bool>> ValidateFilter(
@@ -108,20 +240,33 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         {
             // Compiler validates structure/limits before recursion over client fields.
             compiler.DemandCondition(filter);
-            void Fields(Condition node)
+            void Fields(Condition node, string path)
             {
                 if (node.Context != null)
                     throw new AuthorizationException(
                         "Client filters cannot reference authorization context."
                     );
                 if (node.Field != null)
-                    Demand(node.Field, FieldOperation.Filter, bound);
-                foreach (var child in node.All ?? node.Any ?? [])
-                    Fields(child);
+                    Demand(
+                        node.Field,
+                        FieldOperation.Filter,
+                        bound,
+                        JsonPointer.Append(path, "field")
+                    );
+                var children = node.All ?? node.Any ?? [];
+                for (var index = 0; index < children.Length; index++)
+                    Fields(
+                        children[index],
+                        JsonPointer.Append(
+                            path,
+                            node.All != null ? "all" : "any",
+                            index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        )
+                    );
                 if (node.Not != null)
-                    Fields(node.Not);
+                    Fields(node.Not, JsonPointer.Append(path, "not"));
             }
-            Fields(filter);
+            Fields(filter, "/filter");
             return compiler.ClientPredicate(filter, trusted, bound.Fields[FieldOperation.Filter]);
         }
         return e => true;
@@ -146,9 +291,48 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
     void DemandProjection(bool capable)
     {
         if (!capable && projectionMode == ReadProjectionMode.Required)
-            throw new NotSupportedException(
+            throw new ProviderUnsupportedException(
                 "The entity adapter does not support the required projected retrieval."
             );
+    }
+
+    void DemandOperation(ReadOperations operation)
+    {
+        if (
+            database is IReadProviderCapabilitySource source
+            && !source.Operations.HasFlag(operation)
+        )
+            throw new ProviderUnsupportedException(
+                "The requested operation was disabled at registration.",
+                [
+                    new(
+                        DataAccessErrorCode.ProviderUnsupported,
+                        "/operation",
+                        "The host did not enable this read operation."
+                    ),
+                ]
+            );
+    }
+
+    async ValueTask Preflight(
+        IEntityReadSession<T> session,
+        EntityReadPlan<T> plan,
+        ReadOperations operation,
+        BoundPolicy<T> bound,
+        CancellationToken cancellation,
+        EntitySeekPlan<T>? seek = null
+    )
+    {
+        if (session is IEntityReadPlanValidator<T> validator)
+            await validator.ValidatePlanAsync(
+                plan,
+                operation,
+                seek,
+                compiler.Capabilities,
+                cancellation
+            );
+        if (session is IReadProviderCapabilitySource { Capabilities: { } profile })
+            compiler.DemandCapabilities(bound, profile);
     }
 
     static void ValidateRows(
@@ -170,7 +354,8 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         CancellationToken cancellation = default
     )
     {
-        var (bound, trusted) = await Capture(cancellation);
+        DemandOperation(ReadOperations.Offset);
+        var (bound, trusted, _) = await Capture(cancellation);
         ValidatePagination(request);
         var fetchLimit = FetchLimit(request.Limit, request.IncludeHasMore);
         var fields = ValidateSelection(request.Selection, bound);
@@ -180,6 +365,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         var projected = db as IEntityProjectedReadSession<T>;
         DemandProjection(projected != null);
         var plan = Plan(bound.Predicate.And(filter), request.Sort, fields);
+        await Preflight(db, plan, ReadOperations.Offset, bound, cancellation);
         long? count = request.IncludeTotal ? await db.CountAsync(plan, cancellation) : null;
         if (projected != null)
         {
@@ -211,7 +397,16 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
     static int FetchLimit(int limit, bool lookahead)
     {
         if (lookahead && limit == int.MaxValue)
-            throw new AuthorizationException("Pagination lookahead limit exceeded.");
+            throw new InvalidRequestException(
+                "Pagination lookahead limit exceeded.",
+                [
+                    new(
+                        DataAccessErrorCode.InvalidRequest,
+                        "/limit",
+                        "Pagination lookahead limit exceeded."
+                    ),
+                ]
+            );
         return lookahead ? checked(limit + 1) : limit;
     }
 
@@ -229,10 +424,13 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         CancellationToken cancellation = default
     )
     {
-        var (bound, trusted) = await Capture(cancellation);
+        DemandOperation(ReadOperations.Count);
+        var (bound, trusted, _) = await Capture(cancellation);
         var filter = ValidateFilter(request.Filter, bound, trusted);
         await using var db = await database.OpenAsync(cancellation);
-        var count = await db.CountAsync(Plan(bound.Predicate.And(filter), null), cancellation);
+        var plan = Plan(bound.Predicate.And(filter), null);
+        await Preflight(db, plan, ReadOperations.Count, bound, cancellation);
+        var count = await db.CountAsync(plan, cancellation);
         return new(bound.Version, count);
     }
 
@@ -241,6 +439,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         CancellationToken cancellation = default
     )
     {
+        DemandOperation(ReadOperations.Cursor);
         var configured =
             cursor
             ?? throw new InvalidOperationException(
@@ -254,13 +453,22 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             Sort = request.Sort?.ToArray(),
             Filter = CursorTokens.Snapshot(request.Filter),
         };
-        var (bound, trusted) = await Capture(cancellation);
+        var (bound, trusted, capturedScope) = await Capture(cancellation);
         if (
             request.Limit < 1
             || request.Limit > limits.MaxPageSize
             || request.Limit == int.MaxValue
         )
-            throw new AuthorizationException("Cursor pagination limit exceeded.");
+            throw new InvalidRequestException(
+                "Cursor pagination limit exceeded.",
+                [
+                    new(
+                        DataAccessErrorCode.InvalidRequest,
+                        "/limit",
+                        "Cursor pagination limit exceeded."
+                    ),
+                ]
+            );
         var fetchLimit = FetchLimit(request.Limit, true);
         var fields = ValidateSelection(request.Selection, bound);
         var filter = ValidateFilter(request.Filter, bound, trusted);
@@ -271,7 +479,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             compiler,
             bound,
             trusted,
-            scope,
+            capturedScope,
             configured,
             fields,
             request.Filter,
@@ -298,7 +506,10 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         DemandProjection(projected != null);
         var session = db as IEntitySeekReadSession<T>;
         if (projected == null && session == null)
-            throw new NotSupportedException("The entity adapter does not support seek retrieval.");
+            throw new ProviderUnsupportedException(
+                "The entity adapter does not support seek retrieval."
+            );
+        await Preflight(db, plan, ReadOperations.Cursor, bound, cancellation, seek);
         long? count = request.IncludeTotal ? await db.CountAsync(plan, cancellation) : null;
         if (projected != null)
         {
@@ -344,22 +555,35 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         CancellationToken cancellation = default
     )
     {
-        var (bound, trusted) = await Capture(cancellation);
+        DemandOperation(ReadOperations.Detail);
+        var (bound, trusted, _) = await Capture(cancellation);
         var fields = ValidateSelection(request.Selection, bound);
         var filter = ValidateFilter(request.Filter, bound, trusted);
-        var keyFilter = compiler.Predicate(
-            new()
-            {
-                Field = schema.StableKey.Name,
-                Operator = "eq",
-                Literal = request.Key,
-            },
-            trusted
-        );
+        var keyCondition = new Condition
+        {
+            Field = schema.StableKey.Name,
+            Operator = "eq",
+            Literal = request.Key,
+        };
+        // The key is a scalar request input, not a public filter node.
+        Expression<Func<T, bool>> keyFilter;
+        try
+        {
+            keyFilter = compiler.Predicate(keyCondition, trusted);
+        }
+        catch (InvalidRequestException ex)
+        {
+            throw new InvalidRequestException(
+                "Invalid key.",
+                ex.Diagnostics.Select(d => d with { Path = "/key" }),
+                ex
+            );
+        }
         await using var db = await database.OpenAsync(cancellation);
         var projected = db as IEntityProjectedReadSession<T>;
         DemandProjection(projected != null);
         var plan = Plan(bound.Predicate.And(filter).And(keyFilter), null, fields);
+        await Preflight(db, plan, ReadOperations.Detail, bound, cancellation);
         if (projected != null)
         {
             var row = await projected.SingleProjectedAsync(plan, cancellation);
@@ -380,6 +604,9 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         [EnumeratorCancellation] CancellationToken cancellation = default
     )
     {
+        DemandOperation(ReadOperations.Export);
+        if (export.DataConsistency == ExportDataConsistency.Snapshot)
+            DemandOperation(ReadOperations.Snapshot);
         using var execution = new ExportExecution(export, cancellation);
         execution.Check();
         if (request.Filter != null)
@@ -393,20 +620,22 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         var activationSource =
             export.PolicyConsistency == ExportPolicyConsistency.AbortOnPolicyChange
                 ? store as IActivationAwarePolicySource
-                    ?? throw new NotSupportedException(
+                    ?? throw new ProviderUnsupportedException(
                         "The policy source does not support authoritative activation checks."
                     )
                 : null;
         PolicyActivationStamp? original = null;
         BoundPolicy<T> bound;
         TrustedContext trusted;
+        string capturedScope;
         if (activationSource == null)
-            (bound, trusted) = await execution.RunAsync(Capture);
+            (bound, trusted, capturedScope) = await execution.RunAsync(Capture);
         else
         {
-            trusted = context();
+            trusted = await execution.RunAsync(CaptureContext);
+            capturedScope = scope(trusted);
             var captured = await execution.RunAsync(token =>
-                activationSource.CaptureActivationAsync(scope, schema.Resource, token)
+                activationSource.CaptureActivationAsync(capturedScope, schema.Resource, token)
             );
             if (
                 captured == null
@@ -418,7 +647,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
                     "The policy source returned an invalid activation capture."
                 );
             original = captured.Stamp;
-            bound = compiler.Bind(captured.Policy, trusted, scope, "Read");
+            bound = compiler.Bind(captured.Policy, trusted, capturedScope, "Read");
         }
         var fields = ValidateSelection(request.Selection, bound);
         var filter = ValidateFilter(request.Filter, bound, trusted);
@@ -433,9 +662,12 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             {
                 snapshot = await OpenExportSession(execution);
                 DemandExportSeek(snapshot);
+                await execution.RunAsync(token =>
+                    Preflight(snapshot, plan, ReadOperations.Export, bound, token, seek).AsTask()
+                );
                 var capable =
                     snapshot as IEntitySnapshotReadSession<T>
-                    ?? throw new NotSupportedException(
+                    ?? throw new ProviderUnsupportedException(
                         "The entity adapter does not support export snapshots."
                     );
                 await execution.RunAsync(token => capable.BeginSnapshotAsync(plan, token));
@@ -451,13 +683,13 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
                         limits.ExportBatchSize,
                         export.MaxRows is { } max ? max - delivered : limits.ExportBatchSize
                     );
-                await VerifyActivation(activationSource, original, execution);
+                await VerifyActivation(activationSource, original, capturedScope, execution);
                 var batch =
                     snapshot == null
-                        ? await AcquireExportBatch(seek, fields, limit, execution)
-                        : await ReadExportBatch(snapshot, seek, fields, limit, execution);
+                        ? await AcquireExportBatch(seek, fields, limit, bound, execution)
+                        : await ReadExportBatch(snapshot, seek, fields, limit, bound, execution);
                 execution.Check();
-                await VerifyActivation(activationSource, original, execution);
+                await VerifyActivation(activationSource, original, capturedScope, execution);
                 execution.Check();
                 if (batch.Records.Count == 0)
                     yield break;
@@ -498,19 +730,22 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         var projected = session is IEntityProjectedSeekReadSession<T>;
         DemandProjection(projected);
         if (!projected && session is not IEntitySeekReadSession<T>)
-            throw new NotSupportedException("The entity adapter does not support seek retrieval.");
+            throw new ProviderUnsupportedException(
+                "The entity adapter does not support seek retrieval."
+            );
     }
 
     async Task VerifyActivation(
         IActivationAwarePolicySource? source,
         PolicyActivationStamp? original,
+        string capturedScope,
         ExportExecution execution
     )
     {
         if (source == null)
             return;
         var current = await execution.RunAsync(token =>
-            source.ReadActivationAsync(scope, schema.Resource, token)
+            source.ReadActivationAsync(capturedScope, schema.Resource, token)
         );
         if (current == null)
             throw new InvalidOperationException(
@@ -531,11 +766,12 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         EntitySeekPlan<T> seek,
         string[] fields,
         int limit,
+        BoundPolicy<T> bound,
         ExportExecution execution
     )
     {
         await using var db = await OpenExportSession(execution);
-        return await ReadExportBatch(db, seek, fields, limit, execution);
+        return await ReadExportBatch(db, seek, fields, limit, bound, execution);
     }
 
     async Task<(IReadOnlyList<JsonElement> Records, EntitySeekPlan<T> Next)> ReadExportBatch(
@@ -543,10 +779,14 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         EntitySeekPlan<T> seek,
         string[] fields,
         int limit,
+        BoundPolicy<T> bound,
         ExportExecution execution
     )
     {
         DemandExportSeek(db);
+        await execution.RunAsync(token =>
+            Preflight(db, seek.Read, ReadOperations.Export, bound, token, seek).AsTask()
+        );
         if (db is IEntityProjectedSeekReadSession<T> projected)
         {
             var scalars = await execution.RunAsync(token =>

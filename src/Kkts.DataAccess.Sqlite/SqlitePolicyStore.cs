@@ -3,7 +3,7 @@ using Microsoft.Data.Sqlite;
 namespace Kkts.DataAccess.Sqlite;
 
 public sealed class PolicyConflictException()
-    : Exception("Policy revision conflict. Reload before saving.");
+    : RevisionConflictException("Policy revision conflict. Reload before saving.");
 
 public sealed record DraftSnapshot(
     string? Payload,
@@ -83,7 +83,10 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivationAwar
     {
         admin.Demand(scope);
         if (payload.Length > 1_048_576)
-            throw new AuthorizationException("Draft payload exceeds limit.");
+            throw new InvalidRequestException(
+                "Draft payload exceeds limit.",
+                [new(DataAccessErrorCode.ComplexityExceeded, "", "Draft payload exceeds limit.")]
+            );
         await using var c = await Open(cancellation);
         using var tx = c.BeginTransaction();
         await Execute(
@@ -132,7 +135,8 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivationAwar
         long expectedActive,
         PolicyLimits? limits = null,
         Func<Task>? beforeCommit = null,
-        CancellationToken cancellation = default
+        CancellationToken cancellation = default,
+        IEnumerable<IReadProviderCapabilities>? capabilities = null
     )
         where T : class
     {
@@ -144,9 +148,9 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivationAwar
             throw new PolicyConflictException();
         var nextRevision = NextActivationRevision(head.ActiveRevision);
         if (head.Payload == null)
-            throw new AuthorizationException("No draft exists.");
+            throw new InvalidRequestException("No draft exists.");
         var policy = PolicyJson.Deserialize(head.Payload);
-        new PolicyValidator<T>(schema, registry, limits).DemandValid(policy);
+        new PolicyValidator<T>(schema, registry, limits, capabilities).DemandValid(policy);
         await Execute(
             c,
             tx,
@@ -197,7 +201,8 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivationAwar
         long version,
         long expectedActive,
         PolicyLimits? limits = null,
-        CancellationToken cancellation = default
+        CancellationToken cancellation = default,
+        IEnumerable<IReadProviderCapabilities>? capabilities = null
     )
         where T : class
     {
@@ -210,8 +215,8 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivationAwar
         var nextRevision = NextActivationRevision(head.ActiveRevision);
         var captured = await ReadVersion(c, tx, scope, schema.Resource, version, cancellation);
         if (captured.SchemaVersion != schema.Version)
-            throw new AuthorizationException("Rollback schema is incompatible.");
-        new PolicyValidator<T>(schema, registry, limits).DemandValid(
+            throw new SchemaIncompatibleException("Rollback schema is incompatible.");
+        new PolicyValidator<T>(schema, registry, limits, capabilities).DemandValid(
             PolicyJson.Deserialize(captured.Payload)
         );
         await Execute(
@@ -255,7 +260,7 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivationAwar
         using var tx = c.BeginTransaction(deferred: true);
         var head = await ReadHead(c, tx, scope, resource, cancellation);
         if (head.ActiveVersion == null)
-            throw new AuthorizationException("No active policy.");
+            throw new PolicyMissingException();
         var captured = await ReadVersion(
             c,
             tx,
@@ -282,7 +287,7 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivationAwar
         cmd.Parameters.AddWithValue("$r", resource);
         using var reader = await cmd.ExecuteReaderAsync(cancellation);
         if (!await reader.ReadAsync(cancellation) || reader.IsDBNull(0))
-            throw new AuthorizationException("No active policy.");
+            throw new PolicyMissingException();
         return new(reader.GetInt64(0), reader.GetInt64(1));
     }
 
@@ -385,7 +390,7 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivationAwar
         cmd.Parameters.AddWithValue("$r", resource);
         using var reader = await cmd.ExecuteReaderAsync(token);
         if (!await reader.ReadAsync(token))
-            throw new AuthorizationException("Unknown policy version in this scope/resource.");
+            throw new InvalidRequestException("Unknown policy version.");
         return new(scope, resource, reader.GetString(0), version, reader.GetString(1));
     }
 

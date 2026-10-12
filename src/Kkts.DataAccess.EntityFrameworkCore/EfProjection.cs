@@ -16,15 +16,11 @@ internal sealed class EfProjection<T>
     {
         var model =
             db.Model.FindEntityType(typeof(T))
-            ?? throw new InvalidOperationException("Projection entity is not mapped.");
+            ?? throw new ProviderUnsupportedException("Projection entity is not mapped.");
         var slots = new List<PropertyInfo>();
         int Slot(PropertyInfo binding)
         {
-            var mapped = model.FindProperty(binding.Name);
-            if (mapped?.PropertyInfo != binding || mapped.ClrType != binding.PropertyType)
-                throw new NotSupportedException(
-                    $"Projection binding '{binding.Name}' is not a mapped scalar."
-                );
+            EfModelCapabilities<T>.Demand(EfModelCapabilities<T>.Mapping(db, binding));
             var index = slots.IndexOf(binding);
             if (index >= 0)
                 return index;

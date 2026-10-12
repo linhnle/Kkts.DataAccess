@@ -11,16 +11,44 @@ public interface IContinuationTokenProtector
     byte[] Unprotect(byte[] protectedPayload);
 }
 
-public sealed class InvalidContinuationTokenException() : Exception("Invalid continuation token.");
+public sealed class InvalidContinuationTokenException()
+    : DataAccessException(DataAccessErrorCode.InvalidContinuation, "Invalid continuation token.");
 
 public sealed class CursorReadConfiguration
 {
+    readonly Func<TrustedContext, string>? trustedSubjectId;
     public IContinuationTokenProtector Protector { get; }
     public Func<string> SubjectId { get; }
     public string DatasetId { get; }
     public TimeSpan Lifetime { get; }
     public int MaxEncodedTokenSize { get; }
     public TimeProvider TimeProvider { get; }
+
+    public CursorReadConfiguration(
+        IContinuationTokenProtector protector,
+        Func<TrustedContext, string> subjectId,
+        string datasetId,
+        TimeSpan? lifetime = null,
+        int maxEncodedTokenSize = 16 * 1024,
+        TimeProvider? timeProvider = null
+    )
+        : this(
+            protector,
+            () =>
+                throw new InvalidOperationException(
+                    "The subject requires a captured trusted context."
+                ),
+            datasetId,
+            lifetime,
+            maxEncodedTokenSize,
+            timeProvider
+        )
+    {
+        trustedSubjectId = subjectId ?? throw new ArgumentNullException(nameof(subjectId));
+    }
+
+    internal string GetSubject(TrustedContext context) =>
+        trustedSubjectId is { } subject ? subject(context) : SubjectId();
 
     public CursorReadConfiguration(
         IContinuationTokenProtector protector,
@@ -65,7 +93,7 @@ internal static class CursorScalarCodec
     {
         var type = Nullable.GetUnderlyingType(declared) ?? declared;
         if (!LiteralConverter.IsSupported(type))
-            throw new NotSupportedException("Unsupported cursor scalar type.");
+            throw new ProviderUnsupportedException("Unsupported cursor scalar type.");
         if (value == null)
         {
             if (declared.IsValueType && Nullable.GetUnderlyingType(declared) == null)
@@ -189,7 +217,7 @@ internal static class CursorTokens
     )
         where T : class
     {
-        var subject = config.SubjectId();
+        var subject = config.GetSubject(trusted);
         if (string.IsNullOrWhiteSpace(subject))
             throw new InvalidOperationException(
                 "A server-derived authenticated cursor subject is required."
@@ -246,7 +274,10 @@ internal static class CursorTokens
                 values,
                 compiler.CursorBindingIdentity,
                 PolicyVersion = bound.Version,
-                Policy = compiler.CursorPolicyIdentity(scope, bound.Version),
+                Policy = bound.PolicyIdentity
+                    ?? throw new InvalidOperationException(
+                        "A captured policy identity is required for cursor binding."
+                    ),
             },
             PolicyJson.Options
         );

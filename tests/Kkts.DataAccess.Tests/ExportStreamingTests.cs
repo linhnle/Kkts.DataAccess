@@ -1,6 +1,6 @@
 using System.Net;
-using EmployeeApp.Middleware;
 using Kkts.DataAccess;
+using Kkts.DataAccess.AspNetCore;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -25,7 +25,7 @@ public class ExportStreamingTests
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Logging.ClearProviders();
         await using var app = builder.Build();
-        app.UseMiddleware<ExportLifecycleMiddleware>();
+        app.UseDataAccessProblemDetails();
         var fail = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         app.MapPost(
             "/export",
@@ -61,13 +61,16 @@ public class ExportStreamingTests
             if (!started)
             {
                 Assert.Equal(
-                    duration ? HttpStatusCode.RequestTimeout : HttpStatusCode.Conflict,
+                    duration ? HttpStatusCode.GatewayTimeout : HttpStatusCode.Forbidden,
                     response.StatusCode
                 );
-                Assert.Equal("application/json", response.Content.Headers.ContentType!.MediaType);
+                Assert.Equal(
+                    "application/problem+json",
+                    response.Content.Headers.ContentType!.MediaType
+                );
                 var body = await response.Content.ReadAsStringAsync();
                 Assert.Contains(
-                    duration ? "maximum elapsed duration" : "active policy changed",
+                    duration ? "export_duration_exceeded" : "export_policy_changed",
                     body
                 );
                 Assert.DoesNotContain("authorized prefix", body);

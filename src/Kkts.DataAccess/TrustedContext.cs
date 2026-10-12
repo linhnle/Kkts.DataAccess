@@ -2,6 +2,25 @@ using System.Collections.Frozen;
 
 namespace Kkts.DataAccess;
 
+public interface ITrustedContextProvider
+{
+    ValueTask<TrustedContext> GetAsync(CancellationToken cancellation = default);
+}
+
+public sealed class SynchronousTrustedContextProvider : ITrustedContextProvider
+{
+    readonly Func<TrustedContext> factory;
+
+    public SynchronousTrustedContextProvider(Func<TrustedContext> factory) =>
+        this.factory = factory ?? throw new ArgumentNullException(nameof(factory));
+
+    public ValueTask<TrustedContext> GetAsync(CancellationToken cancellation = default)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(factory());
+    }
+}
+
 public sealed class TrustedContext
 {
     public FrozenSet<string> Roles { get; }
@@ -47,9 +66,7 @@ public sealed class ContextRegistry
                 value != null && !(Nullable.GetUnderlyingType(type) ?? type).IsInstanceOfType(value)
             )
         )
-            throw new AuthorizationException(
-                $"Missing or incorrectly typed trusted context '{key}'."
-            );
+            throw new AuthorizationException("Missing or incorrectly typed trusted context.");
         return value;
     }
 }

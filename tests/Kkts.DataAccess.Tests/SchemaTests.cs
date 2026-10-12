@@ -49,7 +49,7 @@ public class SchemaTests
         var metadata = schema.Metadata(new("actor", "tenant", true), "tenant");
         Assert.Single(metadata.Fields);
         Assert.Equal("Id", metadata.Fields[0].Name);
-        Assert.Throws<AuthorizationException>(() => schema.Resolve("Manager.Id"));
+        Assert.Throws<InvalidRequestException>(() => schema.Resolve("Manager.Id"));
     }
 
     [Theory]
@@ -59,7 +59,7 @@ public class SchemaTests
     [InlineData("null")]
     public void Integer_conversion_rejects_lossy_or_incompatible_literals(string json)
     {
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<InvalidRequestException>(() =>
             LiteralConverter.Convert(JsonDocument.Parse(json).RootElement, typeof(int))
         );
     }
@@ -68,10 +68,10 @@ public class SchemaTests
     public void Conversion_rejects_decimal_rounding_and_binary_precision_loss()
     {
         foreach (var json in new[] { "0.12345678901234567890123456789123", "1e-50" })
-            Assert.Throws<AuthorizationException>(() =>
+            Assert.Throws<InvalidRequestException>(() =>
                 LiteralConverter.Convert(JsonDocument.Parse(json).RootElement, typeof(decimal))
             );
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<InvalidRequestException>(() =>
             LiteralConverter.Convert(JsonDocument.Parse("0.1").RootElement, typeof(double))
         );
         Assert.Equal(

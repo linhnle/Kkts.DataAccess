@@ -172,7 +172,14 @@ document.querySelectorAll('form').forEach((form) =>
         location.href = response.url;
         return;
       }
-      status.textContent = await response.text();
+      if (response.headers.get('content-type')?.includes('application/problem+json')) {
+        const problem = await response.json();
+        status.textContent = [
+          `${problem.code}: ${problem.title}`,
+          ...(problem.diagnostics ?? []).map((d) => `${d.path || '(root)'}: ${d.code}`),
+          `Trace: ${problem.traceId}`,
+        ].join('\n');
+      } else status.textContent = await response.text();
     } catch (error) {
       status.textContent = error.message;
     }

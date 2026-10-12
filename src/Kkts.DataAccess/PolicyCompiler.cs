@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Linq.Expressions;
 using System.Text.Json;
@@ -20,7 +19,11 @@ public sealed record BoundPolicy<T>(
     FrozenDictionary<FieldOperation, FrozenSet<string>> Fields,
     IReadOnlyList<string> ApplicableRules
 )
-    where T : class;
+    where T : class
+{
+    internal PolicyDefinition? Definition { get; init; }
+    internal string? PolicyIdentity { get; init; }
+}
 
 public sealed class PolicyCompiler<T>
     where T : class
@@ -30,26 +33,71 @@ public sealed class PolicyCompiler<T>
     readonly string compilerVersion;
     readonly ExpressionsAdapter<T> expressions;
     readonly PolicyValidator<T> validator;
+    readonly PolicyLimits limits;
+    public IReadOnlyList<IReadProviderCapabilities> Capabilities { get; }
+    public string ValidationIdentity { get; }
     internal ContextRegistry ContextRegistry { get; }
     internal string CursorBindingIdentity =>
-        JsonSerializer.Serialize(new { compilerVersion, mandatory }, PolicyJson.Options);
-
-    internal string CursorPolicyIdentity(string scope, long version) =>
-        templates[(scope, schema.Resource, schema.Version, version, compilerVersion)].Payload;
+        JsonSerializer.Serialize(
+            new
+            {
+                compilerVersion,
+                mandatory,
+                ValidationIdentity,
+            },
+            PolicyJson.Options
+        );
 
     private sealed record CompilationTemplate(string Payload, PolicyDefinition Definition);
 
-    readonly ConcurrentDictionary<
-        (string Scope, string Resource, string Schema, long Version, string Compiler),
+    readonly object templateGate = new();
+    readonly int templateCapacity;
+    readonly Dictionary<
+        (
+            string Scope,
+            string Resource,
+            string Schema,
+            long Version,
+            string Compiler,
+            string Validation
+        ),
         CompilationTemplate
     > templates = new();
+    readonly Queue<(
+        string Scope,
+        string Resource,
+        string Schema,
+        long Version,
+        string Compiler,
+        string Validation
+    )> templateInsertionOrder = new();
+
+    internal int TemplateCount
+    {
+        get
+        {
+            lock (templateGate)
+                return templates.Count;
+        }
+    }
+
+    internal IReadOnlyList<long> TemplateInsertionOrder
+    {
+        get
+        {
+            lock (templateGate)
+                return templateInsertionOrder.Select(key => key.Version).ToArray();
+        }
+    }
 
     public PolicyCompiler(
         ResourceSchema<T> schema,
         ContextRegistry registry,
         Condition mandatory,
         PolicyLimits? limits = null,
-        string compilerVersion = "1"
+        string compilerVersion = "1",
+        IEnumerable<IReadProviderCapabilities>? capabilities = null,
+        PolicyCompilerCacheOptions? cacheOptions = null
     )
     {
         this.schema = schema;
@@ -59,9 +107,18 @@ public sealed class PolicyCompiler<T>
             PolicyJson.Options
         )!;
         var configuredLimits = limits ?? new();
+        this.limits = configuredLimits;
         this.compilerVersion = compilerVersion;
+        templateCapacity = (cacheOptions ?? new()).MaxEntries;
         expressions = new(schema, registry, configuredLimits);
-        validator = new(schema, registry, configuredLimits);
+        Capabilities = Array.AsReadOnly(
+            (capabilities ?? [])
+                .DistinctBy(profile => profile.Identity)
+                .OrderBy(profile => profile.Identity, StringComparer.Ordinal)
+                .ToArray()
+        );
+        ValidationIdentity = string.Join(":", Capabilities.Select(profile => profile.Identity));
+        validator = new(schema, registry, configuredLimits, Capabilities);
         validator.DemandCondition(this.mandatory);
     }
 
@@ -80,19 +137,44 @@ public sealed class PolicyCompiler<T>
             || captured.SchemaVersion != schema.Version
             || captured.Version <= 0
         )
-            throw new AuthorizationException("Incompatible captured policy.");
-        var key = (scope, schema.Resource, schema.Version, captured.Version, compilerVersion);
-        var template = templates.GetOrAdd(
-            key,
-            _ =>
-            {
-                var definition = PolicyJson.Deserialize(captured.Payload);
-                validator.DemandValid(definition);
-                return new CompilationTemplate(captured.Payload, definition);
-            }
+            throw new SchemaIncompatibleException("Incompatible captured policy.");
+        var key = (
+            scope,
+            schema.Resource,
+            schema.Version,
+            captured.Version,
+            compilerVersion,
+            ValidationIdentity
         );
-        if (template.Payload != captured.Payload)
-            throw new AuthorizationException("Immutable policy version content changed.");
+        CompilationTemplate template;
+        lock (templateGate)
+        {
+            if (templates.TryGetValue(key, out var existing))
+            {
+                if (existing.Payload != captured.Payload)
+                    throw new RevisionConflictException(
+                        "Immutable policy version content changed."
+                    );
+                template = existing;
+            }
+            else
+            {
+                try
+                {
+                    var parsedDefinition = PolicyJson.Deserialize(captured.Payload);
+                    validator.DemandValid(parsedDefinition);
+                    template = new CompilationTemplate(captured.Payload, parsedDefinition);
+                }
+                catch (InvalidRequestException ex)
+                {
+                    throw new SchemaIncompatibleException("The captured policy is invalid.", ex);
+                }
+                if (templates.Count == templateCapacity)
+                    templates.Remove(templateInsertionOrder.Dequeue());
+                templates.Add(key, template);
+                templateInsertionOrder.Enqueue(key);
+            }
+        }
         // Privately owned validated AST is never exposed or mutated; request-bound expressions remain uncached.
         var definition = template.Definition;
         var mandatoryPredicate = Predicate(mandatory, context);
@@ -140,7 +222,35 @@ public sealed class PolicyCompiler<T>
             mandatoryPredicate.And(allow).And(negated),
             sets.ToFrozenDictionary(),
             Array.AsReadOnly(applicable.Select(r => r.Id).ToArray())
-        );
+        )
+        {
+            Definition = definition,
+            PolicyIdentity = template.Payload,
+        };
+    }
+
+    internal void DemandCapabilities(BoundPolicy<T> bound, IReadProviderCapabilities profile)
+    {
+        if (Capabilities.Any(existing => existing.Identity == profile.Identity))
+            return;
+        var providerValidator = new PolicyValidator<T>(schema, ContextRegistry, limits, [profile]);
+        try
+        {
+            providerValidator.DemandCondition(mandatory);
+            providerValidator.DemandValid(
+                bound.Definition
+                    ?? throw new InvalidOperationException(
+                        "A captured definition is required for provider validation."
+                    )
+            );
+        }
+        catch (InvalidRequestException exception)
+        {
+            throw new SchemaIncompatibleException(
+                "The captured policy or mandatory predicate is incompatible with the provider.",
+                exception
+            );
+        }
     }
 
     public Expression<Func<T, bool>> Predicate(Condition? condition, TrustedContext context)
@@ -150,7 +260,8 @@ public sealed class PolicyCompiler<T>
         return expressions.Build(condition, context);
     }
 
-    internal void DemandCondition(Condition condition) => validator.DemandCondition(condition);
+    internal void DemandCondition(Condition condition, string inputRoot = "/filter") =>
+        validator.DemandCondition(condition, inputRoot);
 
     internal Expression<Func<T, bool>> ClientPredicate(
         Condition condition,

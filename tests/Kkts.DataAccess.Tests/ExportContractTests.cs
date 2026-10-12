@@ -84,14 +84,14 @@ public class ExportContractTests
     public void Lifecycle_errors_have_stable_safe_messages_and_distinct_types()
     {
         Assert.True(typeof(AuthorizationException).IsSealed);
-        Assert.IsAssignableFrom<TimeoutException>(new ExportDurationExceededException());
+        Assert.IsAssignableFrom<DataAccessException>(new ExportDurationExceededException());
         Assert.Equal(
-            "Export stopped because the active policy changed.",
-            new ExportPolicyChangedException().Message
+            DataAccessErrorCode.ExportPolicyChanged,
+            new ExportPolicyChangedException().Code
         );
         Assert.Equal(
-            "Export exceeded its maximum elapsed duration.",
-            new ExportDurationExceededException().Message
+            DataAccessErrorCode.ExportDurationExceeded,
+            new ExportDurationExceededException().Code
         );
         Assert.DoesNotContain(
             typeof(ExportPolicyChangedException).GetProperties(),

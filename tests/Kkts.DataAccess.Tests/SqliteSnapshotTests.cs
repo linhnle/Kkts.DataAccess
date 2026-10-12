@@ -1,4 +1,5 @@
 using System.Data.Common;
+using Kkts.DataAccess.EntityFrameworkCore;
 using Kkts.DataAccess.Sqlite;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -21,6 +22,12 @@ public class SqliteSnapshotTests : IAsyncLifetime
     class Database(DbContextOptions options) : DbContext(options)
     {
         public bool Disposed;
+
+        public override void Dispose()
+        {
+            Disposed = true;
+            base.Dispose();
+        }
 
         protected override void OnModelCreating(ModelBuilder builder) =>
             builder.Entity<Employee>().ToTable("Employees").HasKey(row => row.Id);
@@ -154,17 +161,33 @@ public class SqliteSnapshotTests : IAsyncLifetime
         if (setting == "retry")
             options.ReplaceService<IExecutionStrategyFactory, RetryingFactory>();
         var contexts = new List<Database>();
-        var adapter = SqliteEntityReads.Create<Employee>(() =>
+        EfEntityReadAdapter<Employee> Create() =>
+            SqliteEntityReads.Create<Employee>(
+                CompilerTests.Schema,
+                () =>
+                {
+                    Database context = setting switch
+                    {
+                        "filter" => new FilteredDatabase(options.Options),
+                        "view" => new ViewDatabase(options.Options),
+                        _ => new Database(options.Options),
+                    };
+                    contexts.Add(context);
+                    return context;
+                },
+                ReadOperations.All | ReadOperations.Snapshot
+            );
+        if (setting is "filter" or "view" or "retry")
         {
-            Database context = setting switch
-            {
-                "filter" => new FilteredDatabase(options.Options),
-                "view" => new ViewDatabase(options.Options),
-                _ => new Database(options.Options),
-            };
-            contexts.Add(context);
-            return context;
-        });
+            var failure = Assert.Throws<ProviderUnsupportedException>(Create);
+            Assert.Contains(
+                failure.Diagnostics,
+                diagnostic => diagnostic.Path == "/operations/snapshot"
+            );
+            Assert.True(Assert.Single(contexts).Disposed);
+            return;
+        }
+        var adapter = Create();
         contexts.Clear();
         var repo = new AuthorizedReadRepository<Employee>(
             CompilerTests.Schema,
@@ -176,7 +199,9 @@ public class SqliteSnapshotTests : IAsyncLifetime
             export: new(dataConsistency: ExportDataConsistency.Snapshot)
         );
         await using var iterator = repo.ExportAsync(new()).GetAsyncEnumerator();
-        await Assert.ThrowsAsync<NotSupportedException>(async () => await iterator.MoveNextAsync());
+        await Assert.ThrowsAsync<ProviderUnsupportedException>(async () =>
+            await iterator.MoveNextAsync()
+        );
         Assert.True(Assert.Single(contexts).Disposed);
         if (setting == "wal")
         {

@@ -227,13 +227,13 @@ public class ExpressionsIntegrationTests
         Assert.True(
             compiler.Predicate(condition, Trusted).Compile()(new() { Text = "quoted'\\text" })
         );
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<InvalidRequestException>(() =>
             compiler.Predicate(CompilerTests.Leaf("Text", "eq", "x"), Trusted)
         );
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<InvalidRequestException>(() =>
             compiler.Predicate(CompilerTests.Leaf("Key", "eq", 1), Trusted)
         );
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<InvalidRequestException>(() =>
             compiler.Predicate(CompilerTests.Leaf("display name'; $now", "contains", "x"), Trusted)
         );
         Assert.Throws<AuthorizationException>(() =>
@@ -277,7 +277,7 @@ public class ExpressionsIntegrationTests
             Definition(new() { All = [new() { Not = CompilerTests.Leaf("Id", "eq", "bad") }] })
         );
         Assert.Single(errors);
-        Assert.Equal("rules[0].condition[0].not", errors[0].Path);
+        Assert.Equal("/rules/0/condition/all/0/not/literal", errors[0].Path);
         var registry = new ContextRegistry(
             new Dictionary<string, Type> { ["missing"] = typeof(int) }
         );
@@ -356,7 +356,7 @@ public class ExpressionsIntegrationTests
                 .Predicate(condition, Trusted)
                 .Compile()(new() { Text = "x", Nullable = 2 })
         );
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<InvalidRequestException>(() =>
             Compiler(limits with { MaxNodes = 2 }).Predicate(condition, Trusted)
         );
         var previous = CultureInfo.CurrentCulture;
@@ -368,7 +368,7 @@ public class ExpressionsIntegrationTests
                     .Predicate(CompilerTests.Leaf("Decimal", "eq", 123.45m), Trusted)
                     .Compile()(new() { Decimal = 123.45m })
             );
-            Assert.Throws<AuthorizationException>(() =>
+            Assert.Throws<InvalidRequestException>(() =>
                 Compiler().Predicate(CompilerTests.Leaf("Double", "eq", 0.1m), Trusted)
             );
         }

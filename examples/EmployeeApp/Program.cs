@@ -2,15 +2,17 @@ using System.Security.Claims;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using EmployeeApp;
-using EmployeeApp.Middleware;
 using Kkts.DataAccess;
+using Kkts.DataAccess.AspNetCore;
 using Kkts.DataAccess.DataProtection;
+using Kkts.DataAccess.DependencyInjection;
 using Kkts.DataAccess.Sqlite;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 builder
@@ -31,6 +33,13 @@ builder
     });
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery();
+builder.Services.AddDataAccessProblemDetails();
+builder.Services.AddHttpContextAccessor();
+builder.Host.UseDefaultServiceProvider(options =>
+{
+    options.ValidateScopes = true;
+    options.ValidateOnBuild = true;
+});
 var cursorKeys =
     builder.Configuration["CursorKeys"]
     ?? Path.Combine(builder.Environment.ContentRootPath, ".cursor-keys");
@@ -70,17 +79,14 @@ switch (provider)
         );
 }
 var options = optionsBuilder.Options;
-IEntityReadAdapter<Employee> entityAdapter = provider switch
-{
-    "Sqlite" => SqliteEntityReads.Create<Employee>(() => new EmployeeDatabase(options)),
-    "SqlServer" => Kkts.DataAccess.SqlServer.SqlServerEntityReads.Create<Employee>(() =>
-        new EmployeeDatabase(options)
-    ),
-    "MySql" => Kkts.DataAccess.MySql.MySqlEntityReads.Create<Employee>(() =>
-        new EmployeeDatabase(options)
-    ),
-    _ => throw new InvalidOperationException("Unknown EntityProvider."),
-};
+builder.Services.AddSingleton<IDbContextFactory<EmployeeDatabase>>(
+    new PooledDbContextFactory<EmployeeDatabase>(options)
+);
+builder.Services.AddSingleton<IContinuationTokenProtector>(
+    services => new DataProtectionContinuationTokenProtector(
+        services.GetRequiredService<IDataProtectionProvider>()
+    )
+);
 var exportConfiguration = new ExportReadConfiguration(
     builder.Configuration.GetValue<ExportPolicyConsistency>("Export:PolicyConsistency"),
     builder.Configuration.GetValue<ExportDataConsistency>("Export:DataConsistency"),
@@ -88,50 +94,64 @@ var exportConfiguration = new ExportReadConfiguration(
     builder.Configuration.GetValue<TimeSpan?>("Export:MaxDuration")
 );
 var store = new SqlitePolicyStore(policyConnection);
-var compiler = new PolicyCompiler<Employee>(
-    EmployeeConfiguration.Schema,
-    EmployeeConfiguration.Registry,
-    EmployeeConfiguration.Mandatory
+var operations =
+    ReadOperations.All
+    | (
+        exportConfiguration.DataConsistency == ExportDataConsistency.Snapshot
+            ? ReadOperations.Snapshot
+            : ReadOperations.None
+    );
+builder.Services.AddAuthorizedReads<Employee>(
+    "employees",
+    resource =>
+        resource
+            .WithSchema(EmployeeConfiguration.Schema)
+            .WithCompiler(EmployeeConfiguration.Registry, EmployeeConfiguration.Mandatory)
+            .WithPolicySource(store)
+            .WithAdapter(services =>
+            {
+                var factory = services.GetRequiredService<IDbContextFactory<EmployeeDatabase>>();
+                return provider switch
+                {
+                    "Sqlite" => SqliteEntityReads.Create<Employee, EmployeeDatabase>(
+                        EmployeeConfiguration.Schema,
+                        factory,
+                        operations
+                    ),
+                    "SqlServer" => Kkts.DataAccess.SqlServer.SqlServerEntityReads.Create<
+                        Employee,
+                        EmployeeDatabase
+                    >(EmployeeConfiguration.Schema, factory, operations),
+                    "MySql" => Kkts.DataAccess.MySql.MySqlEntityReads.Create<
+                        Employee,
+                        EmployeeDatabase
+                    >(EmployeeConfiguration.Schema, factory, operations),
+                    _ => throw new InvalidOperationException("Unknown EntityProvider."),
+                };
+            })
+            .WithTrustedContext<EmployeeTrustedContextProvider>()
+            .WithScope(trusted => "tenant-" + trusted.Values["tenant"])
+            .WithCursorProtection(services =>
+                services.GetRequiredService<IContinuationTokenProtector>()
+            )
+            .WithCursorSubject(trusted =>
+                trusted.Values["subject"] as string
+                ?? throw new AuthorizationException("An authenticated subject is required.")
+            )
+            .WithOptions(
+                new ResourceReadOptions
+                {
+                    ProjectionMode = ReadProjectionMode.Required,
+                    Export = exportConfiguration,
+                    Cursor = new(
+                        builder.Configuration["CursorDataset"]
+                            ?? $"synthetic-employee-{provider}-v1"
+                    ),
+                }
+            )
 );
 var app = builder.Build();
-var cursorProtector = new DataProtectionContinuationTokenProtector(
-    app.Services.GetRequiredService<IDataProtectionProvider>()
-);
-app.Use(
-    async (http, next) =>
-    {
-        try
-        {
-            await next();
-        }
-        catch (Exception ex)
-            when (ex
-                    is AuthorizationException
-                        or PolicyConflictException
-                        or JsonException
-                        or AntiforgeryValidationException
-                        or BadHttpRequestException
-                        or InvalidContinuationTokenException
-            )
-        {
-            if (http.Response.HasStarted)
-            {
-                app.Logger.LogWarning(
-                    "Read response failed after streaming began: {Failure}",
-                    ex.GetType().Name
-                );
-                http.Abort();
-                return;
-            }
-            http.Response.StatusCode =
-                ex is AuthorizationException ? 403
-                : ex is PolicyConflictException ? 409
-                : 400;
-            await http.Response.WriteAsJsonAsync(new { error = ex.Message });
-        }
-    }
-);
-app.UseMiddleware<ExportLifecycleMiddleware>();
+app.UseDataAccessProblemDetails();
 app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -159,23 +179,7 @@ foreach (var tenant in new[] { 1, 2 })
 }
 
 IAuthorizedReadRepository<Employee> Reads(HttpContext http) =>
-    new AuthorizedReadRepository<Employee>(
-        EmployeeConfiguration.Schema,
-        compiler,
-        store,
-        entityAdapter,
-        () => EmployeeConfiguration.Context(http.User),
-        EmployeeConfiguration.Scope(http.User),
-        cursor: new(
-            cursorProtector,
-            () =>
-                http.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                ?? throw new AuthorizationException("Authenticated subject required."),
-            builder.Configuration["CursorDataset"] ?? $"synthetic-employee-{provider}-v1"
-        ),
-        projectionMode: ReadProjectionMode.Required,
-        export: exportConfiguration
-    );
+    http.RequestServices.GetRequiredKeyedService<IAuthorizedReadRepository<Employee>>("employees");
 string Token(HttpContext http) =>
     HtmlEncoder.Default.Encode(
         http
@@ -183,6 +187,10 @@ string Token(HttpContext http) =>
             .GetAndStoreTokens(http)
             .RequestToken!
     );
+IReadOnlyList<IReadProviderCapabilities> Profiles(HttpContext http) =>
+    http
+        .RequestServices.GetRequiredKeyedService<PolicyCompiler<Employee>>("employees")
+        .Capabilities;
 Task Protect(HttpContext http) =>
     http.RequestServices.GetRequiredService<IAntiforgery>().ValidateRequestAsync(http);
 long Revision(IFormCollection form, string name) =>
@@ -343,10 +351,11 @@ app.MapPost(
             var policy = PolicyJson.Deserialize(payload);
             var errors = new PolicyValidator<Employee>(
                 EmployeeConfiguration.Schema,
-                EmployeeConfiguration.Registry
+                EmployeeConfiguration.Registry,
+                capabilities: Profiles(http)
             ).Validate(policy);
             if (errors.Count != 0)
-                return Results.BadRequest(new { diagnostics = errors });
+                throw new InvalidRequestException("Policy validation failed.", errors);
             await store.SaveDraftAsync(
                 admin,
                 admin.Scope,
@@ -373,7 +382,8 @@ app.MapPost(
                 EmployeeConfiguration.Registry,
                 Revision(form, "draftRevision"),
                 Revision(form, "activeRevision"),
-                cancellation: http.RequestAborted
+                cancellation: http.RequestAborted,
+                capabilities: Profiles(http)
             );
             return Results.Redirect("/admin");
         }
@@ -393,7 +403,8 @@ app.MapPost(
                 EmployeeConfiguration.Registry,
                 Revision(form, "version"),
                 Revision(form, "activeRevision"),
-                cancellation: http.RequestAborted
+                cancellation: http.RequestAborted,
+                capabilities: Profiles(http)
             );
             return Results.Redirect("/admin");
         }
@@ -422,6 +433,11 @@ app.MapPost(
                 }
             );
             var policy = PolicyJson.Deserialize(form["payload"].ToString());
+            new PolicyValidator<Employee>(
+                EmployeeConfiguration.Schema,
+                EmployeeConfiguration.Registry,
+                capabilities: Profiles(http)
+            ).DemandValid(policy);
             var captured = new CapturedPolicy(
                 admin.Scope,
                 "Employee",
@@ -433,7 +449,8 @@ app.MapPost(
             var previewCompiler = new PolicyCompiler<Employee>(
                 EmployeeConfiguration.Schema,
                 EmployeeConfiguration.Registry,
-                EmployeeConfiguration.Mandatory
+                EmployeeConfiguration.Mandatory,
+                capabilities: Profiles(http)
             );
             try
             {
@@ -465,14 +482,14 @@ app.MapPost(
                     }
                 );
             }
-            catch (AuthorizationException ex)
+            catch (AuthorizationException)
             {
                 return Results.Json(
                     new
                     {
                         label = "Synthetic fixtures only",
                         denied = true,
-                        error = ex.Message,
+                        code = DataAccessErrorCode.AccessDenied,
                     }
                 );
             }

@@ -306,7 +306,7 @@ public class DtoShapeCacheTests
         );
         DtoMapper.MapValues(schema, [new ProjectedReadRow([2])], ["id"]);
         Assert.Equal(builds, DtoMapper.Cache.BuildCount);
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<InvalidRequestException>(() =>
             DtoMapper.Map(schema, Array.Empty<DtoMapperTests.Row>(), ["id", "unknown"])
         );
     }

@@ -40,12 +40,14 @@ public class SqlServerReadTests : ReadTests
                 );
         }
         Database? context = null;
-        var adapter = SqlServer.SqlServerEntityReads.Create<CompilerTests.Employee>(() =>
-            context = new Database(Options)
+        var adapter = SqlServer.SqlServerEntityReads.Create<CompilerTests.Employee>(
+            CompilerTests.Schema,
+            () => context = new Database(Options),
+            ReadOperations.All | ReadOperations.Snapshot
         );
         await using (var session = await adapter.OpenAsync())
         {
-            await Assert.ThrowsAsync<NotSupportedException>(() =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
                 ((IEntitySnapshotReadSession<CompilerTests.Employee>)session).BeginSnapshotAsync(
                     Plan(),
                     CancellationToken.None
@@ -100,11 +102,13 @@ public class SqlServerReadTests : ReadTests
                 observed,
                 "Expected IN_TRANSITION_TO_OFF while the snapshot remains active."
             );
-            var adapter = SqlServer.SqlServerEntityReads.Create<CompilerTests.Employee>(() =>
-                new Database(Options)
+            var adapter = SqlServer.SqlServerEntityReads.Create<CompilerTests.Employee>(
+                CompilerTests.Schema,
+                () => new Database(Options),
+                ReadOperations.All | ReadOperations.Snapshot
             );
             await using var session = await adapter.OpenAsync();
-            await Assert.ThrowsAsync<NotSupportedException>(() =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
                 ((IEntitySnapshotReadSession<CompilerTests.Employee>)session).BeginSnapshotAsync(
                     Plan(),
                     timeout.Token
@@ -146,8 +150,10 @@ public class MySqlReadTests : ReadTests
             await setup.Database.ExecuteSqlRawAsync(statement);
         }
         Database? context = null;
-        var adapter = MySql.MySqlEntityReads.Create<CompilerTests.Employee>(() =>
-            context = new Database(Options)
+        var adapter = MySql.MySqlEntityReads.Create<CompilerTests.Employee>(
+            CompilerTests.Schema,
+            () => context = new Database(Options),
+            ReadOperations.All | ReadOperations.Snapshot
         );
         await using (var session = await adapter.OpenAsync())
         {
@@ -155,7 +161,7 @@ public class MySqlReadTests : ReadTests
                 row => row.Id > 0,
                 [new(typeof(CompilerTests.Employee).GetProperty("Id")!, false)]
             );
-            await Assert.ThrowsAsync<NotSupportedException>(() =>
+            await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
                 ((IEntitySnapshotReadSession<CompilerTests.Employee>)session).BeginSnapshotAsync(
                     plan,
                     CancellationToken.None
@@ -196,8 +202,10 @@ public class MySqlReadTests : ReadTests
             .AddInterceptors(new ReadCommitted())
             .Options;
         Database? context = null;
-        var adapter = MySql.MySqlEntityReads.Create<CompilerTests.Employee>(() =>
-            context = new Database(options)
+        var adapter = MySql.MySqlEntityReads.Create<CompilerTests.Employee>(
+            CompilerTests.Schema,
+            () => context = new Database(options),
+            ReadOperations.All | ReadOperations.Snapshot
         );
         await using var session = await adapter.OpenAsync();
         var plan = new EntityReadPlan<CompilerTests.Employee>(

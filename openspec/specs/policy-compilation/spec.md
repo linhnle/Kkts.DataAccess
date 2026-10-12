@@ -68,3 +68,48 @@ The system SHALL bind each operation to one published policy version and compati
 #### Scenario: Incompatible schema
 - **WHEN** a published rule references a removed schema field
 - **THEN** execution fails without falling back to unfiltered data
+
+### Requirement: Provider-bound policy validation
+Hosts SHALL be able to bind policy validation/publication/preview and mandatory-constraint validation to the registered provider capability profile. Known unsupported field/operator/mapping combinations SHALL produce stable input-path diagnostics before activation; unverified combinations SHALL remain explicitly labeled and subject to runtime translation. Subject-only context checks SHALL NOT be incorrectly treated as database predicates. Provider-neutral structural validation SHALL remain available and SHALL NOT claim provider conformance. Runtime capture/binding SHALL reject known-incompatible active policy content before entity queries, including policies published through a provider-neutral administrative path.
+
+#### Scenario: Unsupported policy predicate
+- **WHEN** a provider-bound draft uses a known unsupported field/operator combination
+- **THEN** validation identifies its condition path and publication leaves active pointer/content/audit unchanged
+
+#### Scenario: Mandatory constraint unsupported
+- **WHEN** registration supplies a known unsupported mandatory database predicate
+- **THEN** provider-bound startup validation fails rather than weakening or removing the constraint
+
+#### Scenario: Neutral validation remains honest
+- **WHEN** an extension author validates a policy without a provider profile
+- **THEN** validation checks schema/type/complexity only and does not claim successful database translation
+
+### Requirement: Bounded validated template retention
+Each compiler SHALL retain at most its configured positive template-entry capacity, defaulting to 128. Eviction SHALL be deterministic and thread-safe. Cache entries SHALL contain only privately owned validated immutable policy content/templates, never request-bound identity, context, grants, predicates, or records. Invalid builds MUST NOT evict healthy entries or be cached. Auxiliary retained lookup/history structures MUST NOT grow with historical versions. Every bind SHALL still derive fresh authorization from its operation context.
+
+#### Scenario: Capacity exceeded
+- **WHEN** successful compilation introduces more distinct versions than capacity
+- **THEN** retained entries remain within capacity and the deterministic eviction rule removes older templates
+
+#### Scenario: Concurrent distinct users
+- **WHEN** different users bind the same template concurrently while other versions cause eviction
+- **THEN** each bound predicate/grant set uses only its own context and the cache remains bounded
+
+#### Scenario: Invalid build at capacity
+- **WHEN** malformed content is compiled while the cache is full
+- **THEN** compilation fails and healthy retained entries are not displaced by the failed build
+
+### Requirement: Eviction-safe content and operation identity
+Resident same-version different-content captures SHALL fail explicitly. After eviction, content SHALL be reparsed and validated; lifetime immutable version/content enforcement SHALL be guaranteed by the authoritative policy source, not an unbounded compiler history. In-flight operations SHALL retain the exact validated content identity needed for cursor compatibility independently of cache residency. Eviction MUST NOT cause missing-cache-key errors, change an existing operation's policy identity, or relabel its version. This change SHALL preserve the existing token identity algorithm and version compatibility rules.
+
+#### Scenario: Resident content mismatch
+- **WHEN** a retained version is supplied with different payload bytes
+- **THEN** binding rejects the immutable-content mismatch
+
+#### Scenario: Evicted version recompiled
+- **WHEN** an authoritative immutable version is used again after eviction
+- **THEN** it is validated again and executes with fresh request binding, without requiring a retained historical ledger
+
+#### Scenario: Eviction during cursor operation
+- **WHEN** a cursor operation binds a policy and concurrent work evicts its template before fingerprinting
+- **THEN** fingerprinting uses operation-owned validated identity and succeeds without retrieving the evicted template

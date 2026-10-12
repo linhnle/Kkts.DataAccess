@@ -1,5 +1,12 @@
 # Authorized reads
 
+Library input failures now use `InvalidRequestException` with stable codes and
+JSON Pointer diagnostics; forbidden field operations remain
+`AuthorizationException` (`access_denied`). Detail errors identify `/key`, not
+a synthetic policy rule. Inaccessible and absent details still return the same
+null result. Cursor and export errors have distinct typed codes.
+See [structured error migration](errors.md) for the optional HTTP package.
+
 `AuthorizedReads<T>` accepts a schema, compiler, policy store, EF Core database factory, server-derived context factory and administrative scope. `ListAsync`, `CountAsync`, `DetailAsync` and `ExportAsync` own policy capture/validation/execution/mapping. Each operation captures once and binds internally to Read; clients cannot supply an action, executable expression, or authorization identity. Results contain materialized JSON DTOs and captured-policy metadata.
 
 | Operation | Request | Supported inputs |
@@ -17,6 +24,32 @@ Omitted selection uses effective Select fields; [] yields empty DTOs. Explicit u
 Validation precedes opening the entity database and checks only applicable inputs. Count needs no Select or Sort grants; only list validates client pagination. Mandatory/Allow/Deny predicates precede client filters. Lists return an exact total before pagination only when requested; standalone count returns `Task<ReadCount>` with exact `Total` and the operation's captured `PolicyVersion`. Detail adds the host stable-key predicate without requiring a client Filter grant, but explicit client key filters still require that grant. Missing, null, or incompatible detail keys fail before entity access; excluded/nonexistent records both produce null (404 in the example). Ordering appends the host-declared unique stable key; hosts must enforce uniqueness. Invalid/missing stable-key registrations fail.
 
 ## Optional list metadata and versioned counts
+
+### Asynchronous trusted identity
+
+Direct construction accepts `ITrustedContextProvider`, whose
+`ValueTask<TrustedContext> GetAsync(CancellationToken)` awaits server-controlled
+identity work. Existing `Func<TrustedContext>` constructors remain available
+through `SynchronousTrustedContextProvider`; no synchronous wait on async work
+is used. Request payloads still have no identity/scope/role override.
+
+The async-provider repository overload also accepts
+`Func<TrustedContext, string>` for a server scope derived from the captured
+identity. `CursorReadConfiguration` can likewise accept a subject callback over
+that snapshot; its existing no-argument subject callback remains supported.
+These context-based bindings avoid a second identity lookup after asynchronous
+acquisition. The optional [DI integration](dependency-injection.md) uses them
+for operation-bound scope/subject values.
+
+Each operation captures one immutable context snapshot before entity access.
+Export acquires it lazily on first advancement and retains it for every batch,
+including when authoritative policy-change checks run separately. Acquisition
+failure, null context, cancellation, and missing/wrongly typed required values
+fail closed without opening an entity session.
+
+A scoped repository/provider and all export enumeration must remain inside the
+owning host scope. Finish or dispose enumeration before disposing that scope;
+do not return an unconsumed export to background work that outlives its request.
 
 `ReadPage` and `CursorReadPage` expose nullable `Total` and `HasMore`.
 Unrequested metadata is explicitly JSON null, even with ignore-null/default
@@ -141,11 +174,10 @@ instead of `:`): `Export:PolicyConsistency`, `Export:DataConsistency`,
 unchanged; the provider helpers wire snapshot support, with prerequisites still
 owned by the host. Settings never come from request JSON.
 
-Before response start, its lifecycle middleware returns the existing safe JSON
-error shape with HTTP 409 for policy change or 408 for elapsed duration. After
-response start it logs the typed failure and aborts NDJSON, without an error row
-or successful terminal fallback. The API retains its existing error format rather
-than introducing unrelated Problem Details/OpenAPI/service-layer changes.
+Before response start, the optional ASP.NET Core integration returns safe
+Problem Details with HTTP 403 for policy change or 504 for elapsed duration.
+After response start it logs the failure and aborts NDJSON, without an error row
+or successful terminal fallback. See the [error catalog and HTTP migration](errors.md).
 No full-export buffering is added. A previously streamed prefix cannot be
 withdrawn; applications must treat abnormal stream termination as incomplete.
 
@@ -201,6 +233,15 @@ WHERE/ORDER BY dependencies are not selected solely for query evaluation. Sideca
 are separately validated and excluded from public JSON. Overlapping selected and
 continuation properties share physical retrieval slots. Tokens use the unchanged
 encrypted envelope and active-policy/version compatibility strategy.
+Cursor fingerprints use the exact validated raw policy payload carried by the
+bound operation, not a later compiler-cache lookup. Warm, cold and evicted
+template paths therefore use the same token identity algorithm and format.
+Eviction between policy binding and fingerprinting cannot lose or relabel that
+operation's identity. Compatible tokens still resume after template eviction;
+changed policy versions/content or authorization bindings still fail normally.
+Exports likewise retain their initially bound policy/version across batches,
+independently of compiler template residency. See [compiler retention](policies.md#bounded-compiler-templates)
+for entry bounds and authoritative-source immutability requirements.
 Never log tokens, keys or context values. Hosts own persistent/shared key storage,
 application isolation, at-rest protection and rotation; retain decryptable keys
 through token lifetime for restart continuity. Change dataset identity when

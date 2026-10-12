@@ -6,11 +6,49 @@ namespace Kkts.DataAccess.SqlServer;
 
 public static class SqlServerEntityReads
 {
-    public static IEntityReadAdapter<T> Create<T>(Func<DbContext> database)
-        where T : class =>
-        EfEntityReadAdapter<T>.Register(
+    public static EfEntityReadAdapter<T> Create<T, TContext>(
+        ResourceSchema<T> schema,
+        IDbContextFactory<TContext> database,
+        ReadOperations operations = ReadOperations.All
+    )
+        where T : class
+        where TContext : DbContext =>
+        EfEntityReadAdapter<T>.Create(
+            schema,
             database,
             "Microsoft.EntityFrameworkCore.SqlServer",
+            operations,
+            BeginSnapshot<T>
+        );
+
+    public static Task<EfEntityReadAdapter<T>> CreateAsync<T, TContext>(
+        ResourceSchema<T> schema,
+        IDbContextFactory<TContext> database,
+        ReadOperations operations = ReadOperations.All,
+        CancellationToken cancellation = default
+    )
+        where T : class
+        where TContext : DbContext =>
+        EfEntityReadAdapter<T>.RegisterAsync(
+            schema,
+            database,
+            "Microsoft.EntityFrameworkCore.SqlServer",
+            operations,
+            BeginSnapshot<T>,
+            cancellation
+        );
+
+    public static EfEntityReadAdapter<T> Create<T>(
+        ResourceSchema<T> schema,
+        Func<DbContext> database,
+        ReadOperations operations = ReadOperations.All
+    )
+        where T : class =>
+        EfEntityReadAdapter<T>.Register(
+            schema,
+            database,
+            "Microsoft.EntityFrameworkCore.SqlServer",
+            operations,
             BeginSnapshot<T>
         );
 
@@ -25,7 +63,7 @@ public static class SqlServerEntityReads
         command.CommandText =
             "SELECT snapshot_isolation_state FROM sys.databases WHERE database_id=DB_ID()";
         if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellation)) != 1)
-            throw new NotSupportedException(
+            throw new ProviderUnsupportedException(
                 "SQL Server snapshots require ALLOW_SNAPSHOT_ISOLATION fully enabled."
             );
         var entity = db.Model.FindEntityType(typeof(T))!;
@@ -44,7 +82,7 @@ public static class SqlServerEntityReads
         schema.Value = (object?)entity.GetSchema() ?? DBNull.Value;
         command.Parameters.Add(schema);
         if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellation)) != 1)
-            throw new NotSupportedException(
+            throw new ProviderUnsupportedException(
                 "SQL Server snapshots require an ordinary mapped local table."
             );
         return new(await connection.BeginTransactionAsync(IsolationLevel.Snapshot, cancellation));

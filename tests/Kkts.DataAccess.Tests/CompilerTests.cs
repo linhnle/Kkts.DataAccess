@@ -203,7 +203,7 @@ public class CompilerTests
         )
             Assert.Contains(
                 validator.Validate(Definition(Rule("bad", Effect.Allow, c))),
-                d => d.Path.StartsWith("rules[0].condition")
+                d => d.Path.StartsWith("/rules/0/condition")
             );
         var p = Definition(Rule("all", Effect.Allow));
         p = p with
@@ -220,7 +220,7 @@ public class CompilerTests
                 ),
             ],
         };
-        Assert.Contains(validator.Validate(p), d => d.Path.Contains("fields.Sort"));
+        Assert.Contains(validator.Validate(p), d => d.Path.Contains("/fields/Sort"));
         Assert.NotEmpty(
             validator.Validate(
                 p with
@@ -243,7 +243,7 @@ public class CompilerTests
         var json = PolicyJson
             .Serialize(p)
             .Replace("\"condition\":", "\"fields\":[\"Salary\"],\"condition\":");
-        Assert.Throws<JsonException>(() => PolicyJson.Deserialize(json));
+        Assert.Throws<InvalidRequestException>(() => PolicyJson.Deserialize(json));
     }
 
     [Fact]
@@ -358,10 +358,10 @@ public class CompilerTests
                     })
                 )
         );
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<SchemaIncompatibleException>(() =>
             compiler.Bind(captured with { SchemaVersion = "2" }, Context(), "scope")
         );
-        Assert.Throws<AuthorizationException>(() =>
+        Assert.Throws<RevisionConflictException>(() =>
             compiler.Bind(
                 captured with
                 {

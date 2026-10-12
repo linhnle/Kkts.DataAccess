@@ -6,11 +6,49 @@ namespace Kkts.DataAccess.Sqlite;
 
 public static class SqliteEntityReads
 {
-    public static IEntityReadAdapter<T> Create<T>(Func<DbContext> database)
-        where T : class =>
-        EfEntityReadAdapter<T>.Register(
+    public static EfEntityReadAdapter<T> Create<T, TContext>(
+        ResourceSchema<T> schema,
+        IDbContextFactory<TContext> database,
+        ReadOperations operations = ReadOperations.All
+    )
+        where T : class
+        where TContext : DbContext =>
+        EfEntityReadAdapter<T>.Create(
+            schema,
             database,
             "Microsoft.EntityFrameworkCore.Sqlite",
+            operations,
+            BeginSnapshot<T>
+        );
+
+    public static Task<EfEntityReadAdapter<T>> CreateAsync<T, TContext>(
+        ResourceSchema<T> schema,
+        IDbContextFactory<TContext> database,
+        ReadOperations operations = ReadOperations.All,
+        CancellationToken cancellation = default
+    )
+        where T : class
+        where TContext : DbContext =>
+        EfEntityReadAdapter<T>.RegisterAsync(
+            schema,
+            database,
+            "Microsoft.EntityFrameworkCore.Sqlite",
+            operations,
+            BeginSnapshot<T>,
+            cancellation
+        );
+
+    public static EfEntityReadAdapter<T> Create<T>(
+        ResourceSchema<T> schema,
+        Func<DbContext> database,
+        ReadOperations operations = ReadOperations.All
+    )
+        where T : class =>
+        EfEntityReadAdapter<T>.Register(
+            schema,
+            database,
+            "Microsoft.EntityFrameworkCore.Sqlite",
+            operations,
             BeginSnapshot<T>
         );
 
@@ -25,7 +63,7 @@ public static class SqliteEntityReads
             || new SqliteConnectionStringBuilder(connection.ConnectionString).Cache
                 != SqliteCacheMode.Private
         )
-            throw new NotSupportedException(
+            throw new ProviderUnsupportedException(
                 "SQLite snapshots require an explicit private-cache connection."
             );
         using var command = connection.CreateCommand();
@@ -37,12 +75,12 @@ public static class SqliteEntityReads
                 StringComparison.OrdinalIgnoreCase
             )
         )
-            throw new NotSupportedException(
+            throw new ProviderUnsupportedException(
                 "SQLite snapshots require WAL provisioned by the host."
             );
         command.CommandText = "PRAGMA read_uncommitted";
         if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellation)) != 0)
-            throw new NotSupportedException("SQLite snapshots do not support dirty reads.");
+            throw new ProviderUnsupportedException("SQLite snapshots do not support dirty reads.");
         var entity = db.Model.FindEntityType(typeof(T))!;
         command.CommandText =
             "SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=$table";
@@ -55,7 +93,7 @@ public static class SqliteEntityReads
                 .TrimStart()
                 .StartsWith("CREATE TABLE", StringComparison.OrdinalIgnoreCase)
         )
-            throw new NotSupportedException(
+            throw new ProviderUnsupportedException(
                 "SQLite snapshots require an ordinary mapped main-database table."
             );
         cancellation.ThrowIfCancellationRequested();

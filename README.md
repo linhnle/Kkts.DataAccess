@@ -13,6 +13,11 @@ Open `/login` and choose Tenant 1 admin. Fixed synthetic identity login is disab
 
 The designer edits nested typed conditions and independent field entries. Save uses the displayed draft revision. Preview uses fixed synthetic fixtures and sample roles without querying production data or changing the active pointer. Publication checks draft and active revisions. Audit history provides immutable versions for rollback. Validation/conflict diagnostics appear below the editor.
 
+EmployeeApp uses the optional [dependency injection integration](docs/dependency-injection.md):
+scoped/keyed repositories and asynchronous trusted-context capture with pooled,
+independently owned EF contexts. Startup validates structure without requiring an
+active policy or provisioning the database. Direct constructors remain supported.
+
 Default database: `employee.db`. Set `Database='Data Source=/absolute/path/example.db'` to isolate a clean walkthrough. For HTTP acceptance, start a fresh database on port 5189 and run `python3 scripts/example_acceptance.py` from the repository root. HTTP tests do not replace browser interaction checks.
 
 Read inputs are operation-specific: list accepts selection/filter/sort/offset/limit,
@@ -84,12 +89,12 @@ dotnet run --project examples/EmployeeApp --urls http://127.0.0.1:5189
 Use the [provider prerequisites](docs/providers.md#export-wide-snapshots);
 the library does not enable database settings. Capped exports are successful
 prefixes without truncation metadata. Policy changes/deadlines return explicit
-409/408 JSON errors before response start; once NDJSON output starts, they abort
+403/504 Problem Details before response start; once NDJSON output starts, they abort
 the stream without appending an error row. Already delivered prefixes are not
 retractable. Consumers must dispose enumerators and treat interrupted downloads
 as incomplete. See [export lifecycle](docs/reads.md#export-lifecycle).
 
-[Policy contract](docs/policies.md), [Employee policy](docs/employee-policy.json), [Lifecycle](docs/lifecycle.md), [Reads](docs/reads.md), [Dependencies](docs/dependencies.md), and [Acceptance results](docs/acceptance.md), [Repositories](docs/repositories.md), and [Entity providers](docs/providers.md).
+[Policy contract](docs/policies.md), [Employee policy](docs/employee-policy.json), [Lifecycle](docs/lifecycle.md), [Reads](docs/reads.md), [Structured errors and optional HTTP integration](docs/errors.md), [Dependencies](docs/dependencies.md), and [Acceptance results](docs/acceptance.md), [Repositories](docs/repositories.md), and [Entity providers](docs/providers.md).
 
 This release supports reads and mapped scalar database projection. Writes,
 record-dependent fields, masking, relationships and aggregation remain deferred.

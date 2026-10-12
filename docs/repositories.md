@@ -72,6 +72,23 @@ subject function and opaque dataset label; see [cursor setup](reads.md#forward-c
 
 EF hosts use `EfEntityReadAdapter<T>` with an owned DbContext factory and expected provider identity, or provider helpers `SqliteEntityReads.Create<T>`, `SqlServerEntityReads.Create<T>` and `MySqlEntityReads.Create<T>`. A mismatched context provider fails before querying and is disposed. Provider translation failures propagate without fallback. Hosts own mappings, connection configuration, database schema, collation and migrations.
 
+**Breaking provider registration migration:** supplied helper overloads require
+`schema` before the owned context factory and accept a `ReadOperations` mask.
+Synchronous delegate registration validates immediately; asynchronous factories
+use hosted validation, explicit `ValidateAsync`, or `CreateAsync`. Low-level
+`new EfEntityReadAdapter<T>(factory, providerName)` remains runtime-only with no
+startup profile claim. See [provider registration](providers.md).
+
+Optional core seams `IReadProviderCapabilitySource` and
+`IEntityReadPlanValidator<T>` let trusted custom adapters expose immutable metadata
+and validate the complete protected plan before count/retrieval, including seek
+output and continuation bindings. Neither is required for neutral custom adapters;
+omitting them is not a claim of validated provider support. Do not derive profiles
+from request identity or sample data. A schema-aware EF session rechecks its model
+against compiler targets and validates captured policy rules even if publication
+was neutral; failures cannot trigger unrestricted, local or offset retries.
+See [capability validation](provider-capabilities.md).
+
 For snapshot exports, use the provider helpers (or the SQLite facade). They wire
 trusted provider-owned `EfSnapshotFactory` hooks into shared EF ownership without
 adding driver dependencies to the shared package. Direct EF registrations need a

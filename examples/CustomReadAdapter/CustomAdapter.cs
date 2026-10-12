@@ -4,6 +4,7 @@ namespace CustomReadAdapter;
 
 // Extension example: provide your database session implementation to this factory.
 // Execute complete authorized plans in the provider using validated host output/continuation bindings.
+// This neutral example advertises no model profile; see docs/provider-capabilities.md for optional seams.
 public sealed class CustomAdapter<T>(Func<CancellationToken, ValueTask<IEntityReadSession<T>>> open)
     : IEntityReadAdapter<T>
     where T : class

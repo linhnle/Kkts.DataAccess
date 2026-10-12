@@ -86,17 +86,57 @@ public static class PolicyJson
     public static PolicyDefinition Deserialize(string json)
     {
         if (System.Text.Encoding.UTF8.GetByteCount(json) > 1_048_576)
-            throw new JsonException("Policy transport exceeds 1 MiB.");
+            throw new InvalidRequestException(
+                "Policy transport exceeds limit.",
+                [new(DataAccessErrorCode.ComplexityExceeded, "", "Policy transport exceeds limit.")]
+            );
         try
         {
+            using var document = JsonDocument.Parse(
+                json,
+                new JsonDocumentOptions { MaxDepth = 64 }
+            );
+            if (
+                document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("rules", out var rules)
+                && rules.ValueKind == JsonValueKind.Array
+            )
+            {
+                var index = 0;
+                foreach (var rule in rules.EnumerateArray())
+                {
+                    if (
+                        rule.ValueKind == JsonValueKind.Object
+                        && rule.TryGetProperty("fields", out _)
+                    )
+                        throw new InvalidRequestException(
+                            "Record-dependent field grants are unsupported.",
+                            [
+                                new(
+                                    DataAccessErrorCode.ConditionalFieldsUnsupported,
+                                    JsonPointer.Append(
+                                        "",
+                                        "rules",
+                                        index.ToString(
+                                            System.Globalization.CultureInfo.InvariantCulture
+                                        ),
+                                        "fields"
+                                    ),
+                                    "Record-dependent field grants are unsupported."
+                                ),
+                            ]
+                        );
+                    index++;
+                }
+            }
             return JsonSerializer.Deserialize<PolicyDefinition>(json, Options)
                 ?? throw new JsonException("Policy cannot be null.");
         }
-        catch (JsonException ex) when (ex.Message.Contains("'fields'", StringComparison.Ordinal))
+        catch (JsonException ex)
         {
-            throw new JsonException(
-                "Record-dependent field grants are unsupported. Use separate context-wide fieldEntries. "
-                    + ex.Message,
+            throw new InvalidRequestException(
+                "Invalid policy JSON.",
+                [new(DataAccessErrorCode.InvalidRequest, "", "Invalid policy JSON.")],
                 ex
             );
         }

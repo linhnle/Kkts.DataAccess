@@ -27,17 +27,77 @@ public sealed class EfSnapshotTransaction
     }
 }
 
-public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
+public sealed class EfEntityReadAdapter<T>
+    : IEntityReadAdapter<T>,
+        IEntityReadRegistrationValidator<T>,
+        IReadProviderCapabilitySource
     where T : class
 {
-    readonly Func<DbContext> factory;
+    readonly Func<CancellationToken, ValueTask<DbContext>> factory;
     readonly string providerName;
     readonly EfSnapshotFactory? snapshotFactory;
+    ResourceSchema<T>? resourceSchema;
+    public ReadOperations Operations { get; private set; } =
+        ReadOperations.All | ReadOperations.Snapshot;
+    public IReadProviderCapabilities? Capabilities { get; private set; }
+
+    public static EfEntityReadAdapter<T> Create<TContext>(
+        ResourceSchema<T> schema,
+        IDbContextFactory<TContext> factory,
+        string providerName,
+        ReadOperations operations = ReadOperations.All,
+        EfSnapshotFactory? snapshotFactory = null
+    )
+        where TContext : DbContext =>
+        Configure(Create(factory, providerName, snapshotFactory), schema, operations);
+
+    static EfEntityReadAdapter<T> Configure(
+        EfEntityReadAdapter<T> adapter,
+        ResourceSchema<T> schema,
+        ReadOperations operations
+    )
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        if (
+            operations == ReadOperations.None
+            || (operations & ~(ReadOperations.All | ReadOperations.Snapshot)) != 0
+            || operations.HasFlag(ReadOperations.Snapshot)
+                && !operations.HasFlag(ReadOperations.Export)
+        )
+            throw new ArgumentException("Invalid declared read operations.", nameof(operations));
+        adapter.resourceSchema = schema;
+        adapter.Operations = operations;
+        return adapter;
+    }
+
+    void ValidateResource(DbContext db, ResourceSchema<T> schema)
+    {
+        var profile = EfModelCapabilities<T>.Profile(
+            db,
+            schema,
+            Operations,
+            snapshotFactory != null
+        );
+        var errors = profile.ValidateRegistration(schema);
+        if (errors.Count != 0)
+            throw new ProviderUnsupportedException(
+                "The model does not support the declared resource operations.",
+                errors
+            );
+        Capabilities = profile;
+    }
 
     public EfEntityReadAdapter(
         Func<DbContext> factory,
         string providerName,
         EfSnapshotFactory? snapshotFactory = null
+    )
+        : this(OwnedFactory(factory), providerName, snapshotFactory) { }
+
+    EfEntityReadAdapter(
+        Func<CancellationToken, ValueTask<DbContext>> factory,
+        string providerName,
+        EfSnapshotFactory? snapshotFactory
     )
     {
         this.factory = factory ?? throw new ArgumentNullException(nameof(factory));
@@ -47,19 +107,106 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
         this.snapshotFactory = snapshotFactory;
     }
 
-    /// <summary>Validate provider metadata at host registration without opening a connection.</summary>
-    public static EfEntityReadAdapter<T> Register(
-        Func<DbContext> factory,
+    static Func<CancellationToken, ValueTask<DbContext>> OwnedFactory(Func<DbContext> factory)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        return token =>
+        {
+            token.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(factory());
+        };
+    }
+
+    public static EfEntityReadAdapter<T> Create<TContext>(
+        IDbContextFactory<TContext> factory,
         string providerName,
         EfSnapshotFactory? snapshotFactory = null
     )
+        where TContext : DbContext
     {
-        var adapter = new EfEntityReadAdapter<T>(factory, providerName, snapshotFactory);
+        ArgumentNullException.ThrowIfNull(factory);
+        return new(
+            async token => await factory.CreateDbContextAsync(token),
+            providerName,
+            snapshotFactory
+        );
+    }
+
+    public static async Task<EfEntityReadAdapter<T>> RegisterAsync<TContext>(
+        ResourceSchema<T> schema,
+        IDbContextFactory<TContext> factory,
+        string providerName,
+        ReadOperations operations = ReadOperations.All,
+        EfSnapshotFactory? snapshotFactory = null,
+        CancellationToken cancellation = default
+    )
+        where TContext : DbContext
+    {
+        var adapter = Create(schema, factory, providerName, operations, snapshotFactory);
+        await using var db = await adapter.factory(cancellation);
+        cancellation.ThrowIfCancellationRequested();
+        adapter.ValidateProvider(db);
+        if (db.Model.FindEntityType(typeof(T)) == null)
+            throw new InvalidOperationException("The resource entity is not mapped.");
+        adapter.ValidateResource(db, schema);
+        return adapter;
+    }
+
+    public async ValueTask ValidateAsync(
+        ResourceSchema<T> schema,
+        CancellationToken cancellation = default
+    )
+    {
+        cancellation.ThrowIfCancellationRequested();
+        await using var db = await factory(cancellation);
+        cancellation.ThrowIfCancellationRequested();
+        ValidateProvider(db);
+        var model =
+            db.Model.FindEntityType(typeof(T))
+            ?? throw new InvalidOperationException("The resource entity is not mapped.");
+        if (resourceSchema != null)
+        {
+            if (resourceSchema != schema)
+                throw new InvalidOperationException(
+                    "The adapter was configured with a different resource schema."
+                );
+            ValidateResource(db, schema);
+        }
+        else
+        {
+            foreach (var field in schema.Fields.Values)
+                EfModelCapabilities<T>.Demand(EfModelCapabilities<T>.Mapping(db, field.Property));
+        }
+    }
+
+    void ValidateProvider(DbContext db)
+    {
+        if (db.Database.ProviderName != providerName)
+            throw new InvalidOperationException(
+                "The entity provider does not match the registered provider."
+            );
+    }
+
+    /// <summary>Validate provider metadata at host registration without opening a connection.</summary>
+    public static EfEntityReadAdapter<T> Register(
+        ResourceSchema<T> schema,
+        Func<DbContext> factory,
+        string providerName,
+        ReadOperations operations = ReadOperations.All,
+        EfSnapshotFactory? snapshotFactory = null
+    )
+    {
+        var adapter = Configure(
+            new EfEntityReadAdapter<T>(factory, providerName, snapshotFactory),
+            schema,
+            operations
+        );
         using var db = factory();
         if (db.Database.ProviderName != providerName)
             throw new InvalidOperationException(
                 $"Entity provider mismatch: expected {providerName}, received {db.Database.ProviderName}."
             );
+        adapter.ValidateResource(db, schema);
         return adapter;
     }
 
@@ -68,14 +215,14 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
     )
     {
         cancellation.ThrowIfCancellationRequested();
-        var db = factory();
+        var db = await factory(cancellation);
         try
         {
-            if (db.Database.ProviderName != providerName)
-                throw new InvalidOperationException(
-                    $"Entity provider mismatch: expected {providerName}, received {db.Database.ProviderName}."
-                );
-            return new Session(db, snapshotFactory);
+            cancellation.ThrowIfCancellationRequested();
+            ValidateProvider(db);
+            if (resourceSchema != null)
+                ValidateResource(db, resourceSchema);
+            return new Session(db, snapshotFactory, resourceSchema, Operations, Capabilities);
         }
         catch
         {
@@ -84,11 +231,52 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
         }
     }
 
-    sealed class Session(DbContext db, EfSnapshotFactory? snapshotFactory)
+    sealed class Session(
+        DbContext db,
+        EfSnapshotFactory? snapshotFactory,
+        ResourceSchema<T>? schema,
+        ReadOperations operations,
+        IReadProviderCapabilities? capabilities
+    )
         : IEntitySeekReadSession<T>,
             IEntityProjectedSeekReadSession<T>,
-            IEntitySnapshotReadSession<T>
+            IEntitySnapshotReadSession<T>,
+            IEntityReadPlanValidator<T>,
+            IReadProviderCapabilitySource
     {
+        public ReadOperations Operations => operations;
+        public IReadProviderCapabilities? Capabilities => capabilities;
+
+        public ValueTask ValidatePlanAsync(
+            EntityReadPlan<T> plan,
+            ReadOperations operation,
+            EntitySeekPlan<T>? seek = null,
+            IReadOnlyList<IReadProviderCapabilities>? profiles = null,
+            CancellationToken cancellation = default
+        )
+        {
+            cancellation.ThrowIfCancellationRequested();
+            if (!operations.HasFlag(operation))
+                throw new ProviderUnsupportedException(
+                    "The requested operation was disabled at registration."
+                );
+            if (schema != null && capabilities != null && profiles is { Count: > 0 })
+            {
+                var expected = profiles
+                    .Where(profile => profile.Provider == capabilities.Provider)
+                    .ToArray();
+                if (
+                    expected.Length != 0
+                    && expected.All(profile => profile.Identity != capabilities.Identity)
+                )
+                    throw new ProviderUnsupportedException(
+                        "The runtime model differs from its validated capability profile."
+                    );
+            }
+            EfModelCapabilities<T>.ValidatePlan(db, plan, operation, seek);
+            return ValueTask.CompletedTask;
+        }
+
         bool initialized,
             readStarted;
         DbTransaction? nativeTransaction;
@@ -98,13 +286,17 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
 
         public async Task BeginSnapshotAsync(EntityReadPlan<T> plan, CancellationToken cancellation)
         {
+            if (!operations.HasFlag(ReadOperations.Snapshot))
+                throw new ProviderUnsupportedException(
+                    "Snapshot export was disabled at registration."
+                );
             if (initialized || readStarted)
                 throw new InvalidOperationException(
                     "Snapshot initialization requires a fresh session."
                 );
             initialized = true;
             if (snapshotFactory == null)
-                throw new NotSupportedException(
+                throw new ProviderUnsupportedException(
                     "Register a provider-owned snapshot factory for snapshot exports."
                 );
             if (
@@ -117,7 +309,7 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
                     "Snapshot exports cannot join host-owned connections or transactions."
                 );
             if (db.Database.CreateExecutionStrategy().RetriesOnFailure)
-                throw new NotSupportedException(
+                throw new ProviderUnsupportedException(
                     "Snapshot exports do not support automatic execution retries."
                 );
             ValidateSnapshotModel(db, plan);
@@ -137,35 +329,14 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
 
         static void ValidateSnapshotModel(DbContext db, EntityReadPlan<T> plan)
         {
-            var entity =
-                db.Model.FindEntityType(typeof(T))
-                ?? throw new NotSupportedException("Snapshot entity is not mapped.");
-            var tableName = entity.GetTableName();
-            var table =
-                tableName == null
-                    ? null
-                    : db.Model.GetRelationalModel().FindTable(tableName, entity.GetSchema());
-            if (
-                table == null
-                || entity.GetViewName() != null
-                || entity.GetSqlQuery() != null
-                || entity.GetDeclaredQueryFilters().Any()
-                || entity.BaseType != null
-                || entity.GetDerivedTypes().Any()
-                || entity.IsOwned()
-                || entity.FindPrimaryKey() == null
-                || entity.GetTableMappings().Count() != 1
-                || table.EntityTypeMappings.Count() != 1
-            )
-                throw new NotSupportedException(
-                    "Snapshots require an ordinary single-table resource without query filters or shared mappings."
-                );
+            EfModelCapabilities<T>.Demand(EfModelCapabilities<T>.SnapshotShape(db, true));
             _ = new EfProjection<T>(db, plan);
             EfSeekQuery<T>.ValidateOrder(db, plan);
         }
 
         IQueryable<T> Query(EntityReadPlan<T> plan)
         {
+            EfModelCapabilities<T>.ValidatePlan(db, plan, ReadOperations.Count, null);
             readStarted = true;
             if (
                 initialized

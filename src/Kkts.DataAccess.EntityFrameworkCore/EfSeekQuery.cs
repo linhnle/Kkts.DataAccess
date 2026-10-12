@@ -17,34 +17,11 @@ internal static class EfSeekQuery<T>
     {
         var model =
             db.Model.FindEntityType(typeof(T))
-            ?? throw new InvalidOperationException("Seek entity is not mapped.");
+            ?? throw new ProviderUnsupportedException("Seek entity is not mapped.");
         var keys = new List<Expression>();
         foreach (var sort in read.Sort)
         {
-            var property = model.FindProperty(sort.Property.Name);
-            var type =
-                Nullable.GetUnderlyingType(sort.Property.PropertyType)
-                ?? sort.Property.PropertyType;
-            if (
-                property?.PropertyInfo != sort.Property
-                || property.ClrType != sort.Property.PropertyType
-                || property.GetValueConverter() != null
-                || property.GetProviderClrType() != null
-                || !(
-                    type == typeof(string)
-                    || type == typeof(byte)
-                    || type == typeof(sbyte)
-                    || type == typeof(short)
-                    || type == typeof(int)
-                    || type == typeof(long)
-                    || type == typeof(decimal)
-                    || type == typeof(DateTime)
-                    || type.IsEnum
-                )
-            )
-                throw new NotSupportedException(
-                    $"Seek ordering for '{sort.Property.Name}' requires a supported mapped scalar without a custom converter."
-                );
+            EfModelCapabilities<T>.Demand(EfModelCapabilities<T>.Ordering(db, sort.Property, true));
             keys.Add(Expression.Property(parameter, sort.Property));
         }
         return keys;

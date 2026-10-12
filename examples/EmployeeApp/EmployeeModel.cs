@@ -27,6 +27,19 @@ public class EmployeeDatabase(DbContextOptions<EmployeeDatabase> options) : DbCo
     }
 }
 
+public sealed class EmployeeTrustedContextProvider(IHttpContextAccessor accessor)
+    : ITrustedContextProvider
+{
+    public ValueTask<TrustedContext> GetAsync(CancellationToken cancellation = default)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        var user =
+            accessor.HttpContext?.User
+            ?? throw new AuthorizationException("An authenticated request is required.");
+        return ValueTask.FromResult(EmployeeConfiguration.Context(user));
+    }
+}
+
 public static class EmployeeConfiguration
 {
     public static readonly ResourceSchema<Employee> Schema = new(
@@ -150,6 +163,7 @@ public static class EmployeeConfiguration
             new Dictionary<string, object?>
             {
                 { "tenant", int.Parse(user.FindFirstValue("tenant")!) },
+                { "subject", user.FindFirstValue(ClaimTypes.NameIdentifier) },
                 { "user.id", int.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!) },
                 { "user.departmentId", int.Parse(user.FindFirstValue("department")!) },
             }

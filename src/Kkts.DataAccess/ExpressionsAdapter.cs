@@ -143,30 +143,43 @@ internal sealed class ExpressionsAdapter<T>
         var validated = context.ValidateFilterTree(tree, variables);
         if (!validated.Succeeded)
             return validated
-                .Diagnostics.Select(d => new Diagnostic(
-                    path,
-                    PublicMessage(d.Message, alias, condition.Field!)
-                ))
+                .Diagnostics.Select(d => DependencyDiagnostic(d.Code, path, condition))
                 .ToArray();
         var formatted = context.FormatFilterTree(tree, variables);
         if (!formatted.Succeeded)
             return formatted
-                .Diagnostics.Select(d => new Diagnostic(
-                    path,
-                    PublicMessage(d.Message, alias, condition.Field!)
-                ))
+                .Diagnostics.Select(d => DependencyDiagnostic(d.Code, path, condition))
                 .ToArray();
         var analysis = context.AnalyzeExpression(formatted.Result, variables);
         return analysis
-            .Diagnostics.Select(d => new Diagnostic(
-                path,
-                PublicMessage(d.Message, alias, condition.Field!)
-            ))
+            .Diagnostics.Select(d => DependencyDiagnostic(d.Code, path, condition))
             .ToArray();
     }
 
-    static string PublicMessage(string message, string alias, string name) =>
-        message.Replace(alias, name, StringComparison.Ordinal);
+    internal static Diagnostic DependencyDiagnostic(
+        string code,
+        string path,
+        Condition condition
+    ) =>
+        code switch
+        {
+            "unknown-property" => new(
+                DataAccessErrorCode.UnknownProperty,
+                JsonPointer.Append(path, "field"),
+                "Unknown public field."
+            ),
+            "operator-not-applicable" => new(
+                DataAccessErrorCode.OperatorNotApplicable,
+                JsonPointer.Append(path, "operator"),
+                "Unsupported operator for field type."
+            ),
+            "incompatible-operand" => new(
+                DataAccessErrorCode.IncompatibleOperand,
+                JsonPointer.Append(path, condition.Context != null ? "context" : "literal"),
+                "Incompatible operand."
+            ),
+            _ => new(DataAccessErrorCode.InvalidCondition, path, "Invalid condition."),
+        };
 
     internal Expression<Func<T, bool>> Build(
         Condition? condition,
@@ -213,9 +226,7 @@ internal sealed class ExpressionsAdapter<T>
     static Expression<Func<TEntity, bool>> Demand<TEntity>(EvaluationResult<TEntity, bool> result)
     {
         if (!result.Succeeded)
-            throw new AuthorizationException(
-                "Expression construction failed: " + result.Exception?.Message
-            );
+            throw new AuthorizationException("Expression construction failed.", result.Exception);
         return result.Result;
     }
 

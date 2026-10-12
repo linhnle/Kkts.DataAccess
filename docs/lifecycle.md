@@ -8,7 +8,14 @@ SaveDraft compares the expected draft revision, then updates payload/revision an
 
 Rollback requires a version in the same scope/resource, schema compatibility and current validation, checks the active revision, then atomically switches the pointer with an audit event. It preserves old content. Audit summaries are fixed descriptions and contain no policy payloads, sample identity values or request secrets.
 
-CaptureAsync reads the authoritative pointer and immutable content in a read transaction at operation start. New operations observe committed publication/rollback; in-flight operations retain captured content. Missing active policy fails closed.
+CaptureAsync reads the authoritative pointer and immutable content in a read transaction at operation start. New operations observe committed publication/rollback; in-flight operations retain captured content. Missing active policy fails closed with `PolicyMissingException` (`policy_missing`).
+
+Publication validation throws `InvalidRequestException` with bounded coded JSON
+Pointer diagnostics. Stale revisions retain `PolicyConflictException`, now a
+`RevisionConflictException` with `revision_conflict`. Incompatible rollback
+throws `SchemaIncompatibleException` (`schema_incompatible`). No database failure
+is converted into denial; transaction failures propagate and roll back.
+See [structured failures](errors.md) for migration and safe HTTP statuses.
 
 `SqlitePolicyStore` also implements `IActivationAwarePolicySource`.
 `CaptureActivationAsync` reads the head and immutable content in the same deferred

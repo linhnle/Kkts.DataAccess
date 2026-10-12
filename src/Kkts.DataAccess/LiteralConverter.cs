@@ -81,7 +81,16 @@ public static class LiteralConverter
         if (value.ValueKind == JsonValueKind.Null)
         {
             if (declared.IsValueType && Nullable.GetUnderlyingType(declared) == null)
-                throw new AuthorizationException("Null is incompatible with this field.");
+                throw new InvalidRequestException(
+                    diagnostics:
+                    [
+                        new(
+                            DataAccessErrorCode.InvalidLiteral,
+                            "",
+                            "Null is incompatible with this field."
+                        ),
+                    ]
+                );
             return null;
         }
         try
@@ -127,7 +136,16 @@ public static class LiteralConverter
             {
                 var number = value.GetDecimal();
                 if (!ExactDecimal(value.GetRawText(), number))
-                    throw new AuthorizationException("Numeric conversion would lose precision.");
+                    throw new InvalidRequestException(
+                        diagnostics:
+                        [
+                            new(
+                                DataAccessErrorCode.InvalidLiteral,
+                                "",
+                                "Numeric conversion would lose precision."
+                            ),
+                        ]
+                    );
                 if (type == typeof(decimal))
                     return number;
                 if (type == typeof(double))
@@ -160,8 +178,15 @@ public static class LiteralConverter
         catch (Exception ex)
             when (ex is OverflowException or FormatException or InvalidOperationException)
         {
-            throw new AuthorizationException($"Literal must be a lossless {type.Name} value.");
+            throw new InvalidRequestException(
+                "Literal must be a lossless value.",
+                [new(DataAccessErrorCode.InvalidLiteral, "", "Literal must be a lossless value.")],
+                ex
+            );
         }
-        throw new AuthorizationException($"Literal must be a lossless {type.Name} value.");
+        throw new InvalidRequestException(
+            "Literal must be a lossless value.",
+            [new(DataAccessErrorCode.InvalidLiteral, "", "Literal must be a lossless value.")]
+        );
     }
 }
