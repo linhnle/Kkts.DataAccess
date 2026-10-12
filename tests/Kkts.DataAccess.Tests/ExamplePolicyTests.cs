@@ -1,4 +1,3 @@
-using System.Text.Json;
 using EmployeeApp;
 using Xunit;
 

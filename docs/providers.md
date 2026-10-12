@@ -13,6 +13,16 @@ Core retains Kkts.Expressions 3.1.0 and Kkts.Dynamic 2.1.0. Shared execution use
 
 This is a verified baseline, not a promise that every registered scalar/operator translates. Collation is controlled by the host database; production collation can differ. DateTimeOffset and high-precision numeric combinations need explicit host/provider validation. Provider translation errors propagate; no fallback or local authorization evaluation is used. Core literal conversion still rejects lossy inputs.
 
+The shared EF adapter uses Kkts.Expressions 3.1.0 structured `OrderByInfo`
+ordering over the already authorized query. Public `SortField` aliases and Sort
+grants are resolved by the repository before entity access; only registered
+property bindings reach the ordering API. Multi-key directions and stable-key
+completion retain their existing contract, including deterministic ties and
+bounded exports. Delegating expression construction does not expand provider
+type support, alter database collation/null placement, or permit local fallback.
+Custom adapters still consume the provider-neutral `EntityReadPlan<T>` without
+requiring IQueryable or Expressions.
+
 ## Example setup
 
 Keep the legacy `Database='Data Source=employee.db'` setting for default SQLite behavior. New settings are `EntityProvider` (Sqlite, SqlServer, MySql), `EntityDatabase` (required for non-SQLite), and `PolicyDatabase` (SQLite connection string; defaults to legacy Database). Unknown providers fail at startup. Each connection belongs to the host; do not commit production credentials. The example explicitly creates/seeds synthetic entity fixtures; production hosts own mappings/migrations and should provision their schema separately.

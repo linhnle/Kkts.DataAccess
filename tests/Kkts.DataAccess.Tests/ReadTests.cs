@@ -439,6 +439,243 @@ public class ReadTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Structured_null_filters_and_alias_ordering_preserve_relational_results()
+    {
+        var schema = new ResourceSchema<Boundary>(
+            "Boundary",
+            "1",
+            [
+                ResourceSchema<Boundary>.Field("key", e => e.Id, [FieldOperation.Select]),
+                ResourceSchema<Boundary>.Field("tenant", e => e.TenantId, []),
+                ResourceSchema<Boundary>.Field(
+                    "label",
+                    e => e.Text,
+                    [FieldOperation.Select, FieldOperation.Filter, FieldOperation.Sort]
+                ),
+                ResourceSchema<Boundary>.Field(
+                    "amount",
+                    e => e.Amount,
+                    [FieldOperation.Select, FieldOperation.Filter]
+                ),
+                ResourceSchema<Boundary>.Field(
+                    "time",
+                    e => e.Time,
+                    [FieldOperation.Filter, FieldOperation.Sort]
+                ),
+            ],
+            "key"
+        );
+        var definition = new PolicyDefinition(
+            "Boundary",
+            "1",
+            [
+                new("allow", "Boundary", "Read", Effect.Allow, new([], []), null),
+                new(
+                    "deny",
+                    "Boundary",
+                    "Read",
+                    Effect.Deny,
+                    new([], []),
+                    CompilerTests.Leaf("key", "eq", 4)
+                ),
+            ],
+            [
+                new(
+                    "fields",
+                    "Boundary",
+                    "Read",
+                    Effect.Allow,
+                    new([], []),
+                    new()
+                    {
+                        [FieldOperation.Select] = ["key", "label", "amount"],
+                        [FieldOperation.Filter] = ["label", "amount", "time"],
+                        [FieldOperation.Sort] = ["label", "time"],
+                    }
+                ),
+            ]
+        );
+        var time = new DateTime(2026, 1, 1);
+        var rows = new[]
+        {
+            new Boundary
+            {
+                Id = 1,
+                TenantId = 1,
+                Text = null,
+                Amount = null,
+                Time = time,
+            },
+            new Boundary
+            {
+                Id = 2,
+                TenantId = 1,
+                Text = "same",
+                Amount = 2,
+                Time = time,
+            },
+            new Boundary
+            {
+                Id = 3,
+                TenantId = 1,
+                Text = "same",
+                Amount = 3,
+                Time = time.AddDays(1),
+            },
+            new Boundary
+            {
+                Id = 4,
+                TenantId = 1,
+                Text = "denied",
+                Amount = 4,
+                Time = time,
+            },
+            new Boundary
+            {
+                Id = 5,
+                TenantId = 2,
+                Text = "same",
+                Amount = 5,
+                Time = time,
+            },
+        };
+        await using (var db = new Database(Options))
+        {
+            db.AddRange(rows);
+            await db.SaveChangesAsync();
+        }
+        var compiler = new PolicyCompiler<Boundary>(
+            schema,
+            CompilerTests.Registry,
+            CompilerTests.Reference("tenant", "tenant")
+        );
+        var reads = new AuthorizedReadRepository<Boundary>(
+            schema,
+            compiler,
+            new PolicySource(new("scope", "Boundary", "1", 1, PolicyJson.Serialize(definition))),
+            new Kkts.DataAccess.EntityFrameworkCore.EfEntityReadAdapter<Boundary>(
+                () => new Database(Options),
+                ProviderName
+            ),
+            () => CompilerTests.Context(),
+            "scope",
+            new(200, 1_000_000, 1)
+        );
+        var cases = new[]
+        {
+            (CompilerTests.Leaf("label", "eq", null), new[] { 1 }),
+            (CompilerTests.Leaf("label", "ne", null), new[] { 2, 3 }),
+            (CompilerTests.Leaf("amount", "eq", null), new[] { 1 }),
+            (CompilerTests.Leaf("amount", "ne", null), new[] { 2, 3 }),
+            (new Condition { Field = "label", Operator = "isNull" }, new[] { 1 }),
+            (new Condition { Field = "label", Operator = "isNotNull" }, new[] { 2, 3 }),
+            (new Condition { Field = "amount", Operator = "isNull" }, new[] { 1 }),
+            (new Condition { Field = "amount", Operator = "isNotNull" }, new[] { 2, 3 }),
+            (new Condition { Field = "time", Operator = "isNull" }, Array.Empty<int>()),
+            (new Condition { Field = "time", Operator = "isNotNull" }, new[] { 1, 2, 3 }),
+            (CompilerTests.Leaf("label", "in", new object?[] { null, "same" }), new[] { 1, 2, 3 }),
+            (CompilerTests.Leaf("amount", "in", new object?[] { null, 2 }), new[] { 1, 2 }),
+            (
+                new Condition
+                {
+                    Not = CompilerTests.Leaf("amount", "in", new object?[] { null, 2 }),
+                },
+                new[] { 3 }
+            ),
+            (new Condition { Not = CompilerTests.Leaf("label", "contains", "sam") }, new[] { 1 }),
+            (
+                new Condition
+                {
+                    Not = new() { Not = CompilerTests.Leaf("label", "contains", "sam") },
+                },
+                new[] { 2, 3 }
+            ),
+            (
+                new Condition
+                {
+                    Not = new()
+                    {
+                        Any =
+                        [
+                            CompilerTests.Leaf("label", "contains", "sam"),
+                            new() { Not = CompilerTests.Leaf("amount", "eq", null) },
+                        ],
+                    },
+                },
+                new[] { 1 }
+            ),
+            (CompilerTests.Leaf("label", "ne", "same"), new[] { 1 }),
+            (CompilerTests.Leaf("label", "startsWith", "sam"), new[] { 2, 3 }),
+            (CompilerTests.Leaf("label", "endsWith", "ame"), new[] { 2, 3 }),
+            (CompilerTests.Leaf("label", "contains", null), Array.Empty<int>()),
+            (CompilerTests.Leaf("amount", "lt", null), Array.Empty<int>()),
+            (CompilerTests.Leaf("amount", "le", null), Array.Empty<int>()),
+            (CompilerTests.Leaf("amount", "gt", null), Array.Empty<int>()),
+            (CompilerTests.Leaf("amount", "ge", null), Array.Empty<int>()),
+            (CompilerTests.Leaf("amount", "ge", 2), new[] { 2, 3 }),
+            (new Condition { Not = CompilerTests.Leaf("amount", "gt", null) }, new[] { 1, 2, 3 }),
+        };
+        foreach (var (filter, expected) in cases)
+        {
+            var predicate = compiler.Predicate(filter, CompilerTests.Context()).Compile();
+            Assert.Equal(
+                expected,
+                rows.Where(row => row.TenantId == 1 && row.Id != 4)
+                    .Where(predicate)
+                    .Select(row => row.Id)
+            );
+            var request = new ReadRequest(Selection: ["key"], Filter: filter);
+            var page = await reads.ListAsync(request);
+            Assert.Equal(expected, page.Records.Select(row => row.GetProperty("key").GetInt32()));
+            Assert.Equal(expected.Length, await reads.CountAsync(request));
+        }
+        var sorted = await reads.ListAsync(
+            new(Selection: ["amount"], Sort: [new("label", true), new("label")])
+        );
+        Assert.Equal(
+            new decimal?[] { 2, 3, null },
+            sorted.Records.Select(row =>
+                row.GetProperty("amount").ValueKind == JsonValueKind.Null
+                    ? (decimal?)null
+                    : row.GetProperty("amount").GetDecimal()
+            )
+        );
+        Assert.All(sorted.Records, row => Assert.Single(row.EnumerateObject()));
+        var multiKey = await reads.ListAsync(
+            new(Selection: ["key"], Sort: [new("label"), new("time", true)])
+        );
+        Assert.Equal(
+            new[] { 1, 3, 2 },
+            multiKey.Records.Select(row => row.GetProperty("key").GetInt32())
+        );
+        var reverse = await reads.ListAsync(
+            new(Selection: ["key"], Sort: [new("label", true), new("time")])
+        );
+        Assert.Equal(
+            new[] { 2, 3, 1 },
+            reverse.Records.Select(row => row.GetProperty("key").GetInt32())
+        );
+        var exported = new List<decimal?>();
+        await foreach (
+            var batch in reads.ExportAsync(new(Selection: ["amount"], Sort: [new("label", true)]))
+        )
+        {
+            Assert.All(batch.Records, row => Assert.Single(row.EnumerateObject()));
+            exported.AddRange(
+                batch.Records.Select(row =>
+                    row.GetProperty("amount").ValueKind == JsonValueKind.Null
+                        ? (decimal?)null
+                        : row.GetProperty("amount").GetDecimal()
+                )
+            );
+        }
+        Assert.Equal(new decimal?[] { 2, 3, null }, exported);
+        await Assert.ThrowsAsync<AuthorizationException>(() =>
+            reads.ListAsync(new(Sort: [new("key")]))
+        );
+    }
+
+    [Fact]
     public async Task Real_provider_sessions_dispose_on_early_export_and_cancellation()
     {
         var sessions = new List<Database>();

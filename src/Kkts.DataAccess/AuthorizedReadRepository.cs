@@ -93,7 +93,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         if (request.Filter != null)
         {
             // Compiler validates structure/limits before recursion over client fields.
-            var filter = compiler.Predicate(request.Filter, trusted);
+            compiler.DemandCondition(request.Filter);
             void Fields(Condition node)
             {
                 if (node.Context != null)
@@ -108,7 +108,14 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
                     Fields(node.Not);
             }
             Fields(request.Filter);
-            return (selection, filter);
+            return (
+                selection,
+                compiler.ClientPredicate(
+                    request.Filter,
+                    trusted,
+                    bound.Fields[FieldOperation.Filter]
+                )
+            );
         }
         return (selection, e => true);
     }

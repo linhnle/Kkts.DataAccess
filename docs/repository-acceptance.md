@@ -1,5 +1,52 @@
 # Repository provider acceptance
 
+## Expression-query integration
+
+Verified 2026-10-12 on SDK 10.0.401 with Kkts.Expressions 3.1.0 and
+Kkts.Dynamic 2.1.0 unchanged:
+
+- `dotnet restore Kkts.DataAccess.slnx --locked-mode` passed without dependency
+  or lock-file changes.
+- `dotnet build Kkts.DataAccess.slnx --no-restore` passed with zero warnings and
+  zero errors, including the existing core-only custom-adapter example and
+  employee application.
+- The focused expression/compiler/read/repository run passed all 45 tests.
+- The README SQLite/core command,
+  `dotnet test Kkts.DataAccess.slnx --no-build --filter 'Provider!=SqlServer&Provider!=MySql'`,
+  passed 75 tests, failed none, and skipped the one opt-in DTO performance
+  measurement. No performance measurement was rerun for this integration.
+- Both already-running local fixture services from
+  `scripts/provider-databases.compose.yml` were used with their isolated test
+  connections. The remote-only command,
+  `dotnet test Kkts.DataAccess.slnx --no-build --filter 'Provider=SqlServer|Provider=MySql'`,
+  passed all 14 tests (seven each for real SQL Server and MySQL), with no failures
+  or skips. Each test created and removed its own entity database.
+- The expanded shared provider regression checks null eq/ne, explicit null
+  predicates on nullable and nonnullable fields, ordered comparisons against
+  null, mixed null membership and its negation, nested NOT, and string guards
+  against fixed identifiers and in-memory truth tables. All three providers
+  preserve mandatory tenant isolation and overlapping deny exclusion.
+- Ordering checks cover exact public aliases, mixed ascending/descending keys,
+  repeated keys, stable ties, and single-row export batches without exposing the
+  hidden stable key. Existing checks still reject forbidden Sort before session
+  opening and propagate translation failures without a local/unrestricted
+  fallback; cancellation, disposal, and captured-policy/context isolation pass.
+- Production dependency inspection confirms `ExpressionsAdapter<T>` uses
+  `ValidateFilterTree`, `FormatFilterTree`, `AnalyzeExpression`, and structured
+  `TryBuildPredicate<T>`, while the EF adapter uses structured `OrderByInfo`
+  ordering. There is no parallel manual leaf/operator compiler or manual
+  Queryable ordering construction. Public policy JSON, diagnostics, read plans,
+  sort requests, and repository constructors remain compatible.
+- `npm run format:check` passed CSharpier checks for 46 C#/XML files and the
+  Prettier JavaScript check. Strict OpenSpec validation passed with the declared
+  implementation-only spec skip.
+
+Total for the two complete suite selections: **89 passed, 0 failed, 1 skipped**.
+The HTTP/browser/package-consumption walkthroughs below are earlier baseline
+evidence, not reruns for this expression integration.
+
+## Original repository-provider baseline
+
 Verified 2026-10-12 on .NET 10.0.401. Kkts.Expressions 3.1.0 and Kkts.Dynamic 2.1.0 remain unchanged.
 
 - Locked solution restore passed; build completed with zero warnings/errors.

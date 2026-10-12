@@ -1,4 +1,4 @@
-using System.Linq.Expressions;
+using Kkts.Expressions;
 using Microsoft.EntityFrameworkCore;
 
 namespace Kkts.DataAccess.EntityFrameworkCore;
@@ -69,26 +69,13 @@ public sealed class EfEntityReadAdapter<T> : IEntityReadAdapter<T>
         )
         {
             var query = Query(plan);
-            for (var i = 0; i < plan.Sort.Count; i++)
-            {
-                var sort = plan.Sort[i];
-                var parameter = Expression.Parameter(typeof(T), "e");
-                var selector = Expression.Lambda(
-                    Expression.Property(parameter, sort.Property),
-                    parameter
-                );
-                var method =
-                    (i == 0 ? "OrderBy" : "ThenBy") + (sort.Descending ? "Descending" : "");
-                query = query.Provider.CreateQuery<T>(
-                    Expression.Call(
-                        typeof(Queryable),
-                        method,
-                        [typeof(T), sort.Property.PropertyType],
-                        query.Expression,
-                        Expression.Quote(selector)
-                    )
-                );
-            }
+            query = query.OrderBy(
+                plan.Sort.Select(sort => new OrderByInfo
+                {
+                    Property = sort.Property.Name,
+                    Descending = sort.Descending,
+                })
+            );
             return await query.Skip(offset).Take(limit).ToListAsync(cancellation);
         }
 

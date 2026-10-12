@@ -11,6 +11,7 @@ public sealed class PolicyValidator<T>(
     where T : class
 {
     readonly PolicyLimits limits = configuredLimits ?? new();
+    readonly ExpressionsAdapter<T> expressions = new(schema, context, configuredLimits ?? new());
 
     public IReadOnlyList<Diagnostic> Validate(PolicyDefinition policy)
     {
@@ -124,6 +125,7 @@ public sealed class PolicyValidator<T>(
                 {
                     if (c.Literal.ValueKind != JsonValueKind.Undefined || c.Context != null)
                         throw new AuthorizationException("Null predicates take no value.");
+                    errors.AddRange(expressions.ValidateLeaf(c, path, subject));
                     return;
                 }
                 if (
@@ -168,6 +170,7 @@ public sealed class PolicyValidator<T>(
                     else
                         LiteralConverter.Convert(literal, type);
                 }
+                errors.AddRange(expressions.ValidateLeaf(c, path, subject));
             }
             catch (AuthorizationException ex)
             {

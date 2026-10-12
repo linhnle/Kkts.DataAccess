@@ -6,6 +6,17 @@ Omitted selection uses effective Select fields; [] yields empty DTOs. Explicit u
 
 Validation precedes opening the entity database. Mandatory/Allow/Deny predicates precede client filters. Counts run before pagination. Detail adds the host stable-key predicate without granting client privileges; excluded/nonexistent records both produce null (404 in the example). Ordering appends the host-declared unique stable key; hosts must enforce uniqueness. Invalid/missing keys prevent registration.
 
+`AuthorizedReadRepository<T>` resolves each `SortField` by its exact public alias
+and checks its effective Sort grant before opening an entity session. It supplies
+registered property bindings and directions through the unchanged
+`EntityReadPlan<T>`/`EntitySort` contract. The shared EF adapter applies
+Kkts.Expressions 3.1.0 structured `OrderByInfo` ordering to the authorized query
+before pagination, preserving multi-key order and directions. Repeated sort keys
+remain valid; the stable key is appended only when not explicitly present and
+does not acquire output, Filter, or Sort privileges. Custom adapters and existing
+repository constructors remain unchanged; clients still send `SortField`, not
+raw properties, ordering strings, or executable expressions.
+
 ReadLimits defaults: max page 200, max offset 1,000,000, export batch 100. Export validates requests but covers all matching rows from offset zero and retains one policy/version across bounded batches. Cancellation flows through capture and queries.
 
 The shared repository supports SQLite, SQL Server and MySQL entity adapters with SQLite policy storage; see [provider support](providers.md). The SQLite provider baseline is EF Core 10.0.12. Translation/database errors propagate with no unrestricted or local-authorization fallback. Provider restrictions (including some decimal/DateTimeOffset ordering) fail explicitly. Hidden columns can be materialized inside the trusted facade; Phase 1 does not promise column projection. Kkts.Dynamic maps only permitted scalar public bindings in OneWayToDto mode, then serializes before returning results.
