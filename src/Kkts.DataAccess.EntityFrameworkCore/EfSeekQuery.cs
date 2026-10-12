@@ -6,14 +6,20 @@ namespace Kkts.DataAccess.EntityFrameworkCore;
 internal static class EfSeekQuery<T>
     where T : class
 {
-    internal static IQueryable<T> Apply(DbContext db, IQueryable<T> query, EntitySeekPlan<T> plan)
+    internal static void ValidateOrder(DbContext db, EntityReadPlan<T> read) =>
+        _ = SortKeys(db, read, Expression.Parameter(typeof(T), "row"));
+
+    static List<Expression> SortKeys(
+        DbContext db,
+        EntityReadPlan<T> read,
+        ParameterExpression parameter
+    )
     {
         var model =
             db.Model.FindEntityType(typeof(T))
             ?? throw new InvalidOperationException("Seek entity is not mapped.");
-        var parameter = Expression.Parameter(typeof(T), "row");
         var keys = new List<Expression>();
-        foreach (var sort in plan.Read.Sort)
+        foreach (var sort in read.Sort)
         {
             var property = model.FindProperty(sort.Property.Name);
             var type =
@@ -41,6 +47,13 @@ internal static class EfSeekQuery<T>
                 );
             keys.Add(Expression.Property(parameter, sort.Property));
         }
+        return keys;
+    }
+
+    internal static IQueryable<T> Apply(DbContext db, IQueryable<T> query, EntitySeekPlan<T> plan)
+    {
+        var parameter = Expression.Parameter(typeof(T), "row");
+        var keys = SortKeys(db, plan.Read, parameter);
         if (plan.Boundary != null)
         {
             Expression after = Expression.Constant(false);

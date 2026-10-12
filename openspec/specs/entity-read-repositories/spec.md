@@ -68,7 +68,7 @@ The system SHALL expose a generic read-only repository supporting list, detail, 
 - **THEN** the request redesign does not require new adapter/session methods or a policy storage migration
 
 ### Requirement: Independent entity and policy databases
-The system SHALL allow entity reads from SQLite, SQL Server or MySQL while policy drafts, publication, audit history and rollback remain in SQLite. Each operation SHALL capture its policy from the configured policy store before entity execution; exports SHALL retain that capture across batches. Entity provider selection MUST NOT migrate or initialize policy tables in the entity database.
+The system SHALL allow entity reads from SQLite, SQL Server or MySQL while policy drafts, publication, audit history and rollback remain in SQLite. Each operation SHALL capture its policy from the configured policy store before entity execution; exports SHALL retain that capture for every delivered batch and optionally abort on a later policy activation according to host configuration. Entity snapshot transactions SHALL NOT encompass authoritative policy revision reads or imply an atomic snapshot across the two stores. Entity provider selection MUST NOT migrate or initialize policy tables in the entity database.
 
 #### Scenario: Separate databases
 - **WHEN** a host selects SQL Server or MySQL for entities and SQLite for policies
@@ -76,7 +76,7 @@ The system SHALL allow entity reads from SQLite, SQL Server or MySQL while polic
 
 #### Scenario: Publication during export
 - **WHEN** the SQLite policy store publishes a new version during an export from another provider
-- **THEN** later export batches retain the original policy while newly started operations capture the new version
+- **THEN** captured-policy exports retain the original policy, abort-mode exports stop when their check observes activation change, and newly started operations capture the new version
 
 ### Requirement: Provider registration and extensibility
 The system SHALL supply usable SQLite, SQL Server and MySQL entity adapters and allow a host to register an additional adapter through the same repository boundary without changing policy compilation or client contracts. Registration SHALL explicitly identify the entity provider and connection configuration. Unknown, missing or contradictory provider configuration SHALL fail clearly without silently choosing a different provider.
@@ -101,11 +101,11 @@ Each adapter SHALL document its supported database versions, field types, operat
 - **THEN** tenant isolation, deny precedence, hidden-field restrictions, null cases, deterministic tie ordering, detail/count/export and policy version capture satisfy the common contract
 
 ### Requirement: Execution ownership and SQLite compatibility
-Repository operations SHALL propagate cancellation and dispose owned entity sessions on success, failure, and export termination. An export SHALL have bounded batches and SHALL NOT promise a cross-batch data snapshot. Existing SQLite facade construction SHALL remain source-compatible and route through the shared enforcement path. SQLite read method signatures SHALL migrate together with the core operation-specific request contracts, intentionally replacing the earlier read-method source-compatibility guarantee.
+Repository operations SHALL propagate cancellation and dispose owned entity sessions on success, failure, and export termination. An export SHALL have bounded batches; best-effort mode SHALL NOT promise a cross-batch data snapshot, and requested snapshot mode SHALL require one export-wide owned transaction. Policy-change abort, duration expiry, capped completion, consumer cancellation, and early disposal SHALL release owned connections/transactions without further batches. Disposal SHALL remain cooperative with async enumeration rather than promising cleanup of an abandoned undisposed enumerator. Existing SQLite facade construction SHALL remain source-compatible and route through the shared enforcement path, exposing the same host export configuration as core. SQLite read method signatures SHALL migrate together with the core operation-specific request contracts, intentionally replacing the earlier read-method source-compatibility guarantee.
 
 #### Scenario: Export stopped early
-- **WHEN** a consumer cancels or stops enumerating an export
-- **THEN** owned database resources are released without executing further batches
+- **WHEN** a consumer cancels or stops enumerating an export and disposes its enumerator
+- **THEN** owned database resources, including any snapshot transaction, are released without executing further batches
 
 #### Scenario: Existing SQLite caller
 - **WHEN** an existing host replaces the shared request with operation-specific requests and moves the detail key into its request
@@ -113,7 +113,11 @@ Repository operations SHALL propagate cancellation and dispose owned entity sess
 
 #### Scenario: Existing SQLite registration
 - **WHEN** an existing host constructs the SQLite facade with its current schema, compiler, store, database factory, context factory, scope, and limits
-- **THEN** construction remains supported and the facade delegates to the shared repository
+- **THEN** construction remains supported and the facade delegates to the shared repository with captured-policy, best-effort export defaults
+
+#### Scenario: Limited snapshot cleanup
+- **WHEN** a snapshot export completes at its row cap or fails a policy/deadline check
+- **THEN** its export-wide transaction/session are released without further entity queries
 
 ### Requirement: Trusted seek execution capability
 The repository SHALL execute cursor pages and exports through a trusted seek-capable entity session, using projected seek when projection is required or when the relevant projected capability is available. Seek requests SHALL carry the complete authorized query, resolved ordering, validated output bindings, and typed boundary values derived by the repository, never client executable expressions. Existing count, offset-page, and single-record adapter/session contracts SHALL remain available subject to the host's projection requirement for retrieval. An adapter without either projected or explicitly allowed entity seek capability SHALL fail explicitly for cursor lists and exports. The core repository and SQLite facade SHALL expose matching cursor operations and projection configuration. No unsupported seek execution SHALL fall back to growing offsets, unrestricted fetching, or local authorization evaluation.
@@ -163,3 +167,26 @@ The library SHALL provide an optional protection integration using established a
 #### Scenario: Key or application isolation mismatch
 - **WHEN** a token is presented to a host with incompatible key or application-purpose configuration
 - **THEN** the token is rejected rather than interpreted as an unprotected boundary
+
+### Requirement: Export-wide entity snapshot capability
+Snapshot exports SHALL require an explicit trusted adapter capability that owns one entity session, connection, and consistent read transaction across every batch. All entity row membership, selected values, and sort tuples SHALL be read from the same provider snapshot established before first batch delivery. Snapshot capability MUST NOT broaden permissions, bypass required projection, or freeze authoritative policy checks. Supplied SQLite, SQL Server, and MySQL adapters SHALL implement snapshot export for documented verified prerequisites. Unsupported adapters or missing database prerequisites SHALL fail explicitly before first batch delivery without silently using best-effort, a per-statement snapshot, or a weaker isolation level. Snapshot loss or a transaction failure after delivery SHALL abort without reopening/replaying from another snapshot. Operational settings MUST NOT be silently enabled by the library.
+
+#### Scenario: Entity mutations after first batch
+- **WHEN** another connection commits insertions, deletions, selected-value changes, and sort-key changes after a snapshot export's first batch
+- **THEN** remaining batches match the original snapshot's authorized ordered sequence and values
+
+#### Scenario: Adapter lacks snapshot capability
+- **WHEN** a host requires snapshot through a seek adapter lacking the snapshot capability
+- **THEN** export fails explicitly before delivering rows and does not use ordinary per-batch sessions instead
+
+#### Scenario: Provider prerequisites missing
+- **WHEN** a configured provider cannot establish its documented export-wide snapshot
+- **THEN** export fails explicitly before first delivery without changing database settings or downgrading consistency
+
+#### Scenario: Snapshot connection fails after delivery
+- **WHEN** the connection or transaction fails after one batch is delivered
+- **THEN** export aborts, releases resources, and does not replay or continue from a newly acquired snapshot
+
+#### Scenario: Snapshot keeps projection boundary
+- **WHEN** snapshot export selects a narrow DTO with hidden authorization and continuation fields
+- **THEN** it enforces the same database predicate and authorized projection/sidecar rules as best-effort export

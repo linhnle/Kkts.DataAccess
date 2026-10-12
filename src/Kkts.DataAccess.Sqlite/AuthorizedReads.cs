@@ -18,19 +18,25 @@ public sealed class AuthorizedReads<T> : IAuthorizedReadRepository<T>
         string scope,
         ReadLimits? limits = null,
         CursorReadConfiguration? cursor = null,
-        ReadProjectionMode projectionMode = ReadProjectionMode.Required
+        ReadProjectionMode projectionMode = ReadProjectionMode.Required,
+        ExportReadConfiguration? export = null
     )
     {
         repository = new(
             schema,
             compiler,
             store,
-            new EfEntityReadAdapter<T>(database, "Microsoft.EntityFrameworkCore.Sqlite"),
+            new EfEntityReadAdapter<T>(
+                database,
+                "Microsoft.EntityFrameworkCore.Sqlite",
+                SqliteEntityReads.BeginSnapshot<T>
+            ),
             context,
             scope,
             limits,
             cursor,
-            projectionMode
+            projectionMode,
+            export
         );
     }
 

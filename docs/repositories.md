@@ -4,7 +4,7 @@
 
 Trusted host code supplies an `IEntityReadAdapter<T>`. Its async sessions receive immutable `EntityReadPlan<T>` values built by the repository; plans include the complete authorized predicate, resolved sort properties including the stable key, and ordered authorized `OutputBindings`. Filter/sort-only dependencies are not output bindings. Execute the complete predicate in the provider before counting or paging. Never replace it, return a query handle to clients, or evaluate authorization locally after fetching unrestricted records. Only permitted JSON DTOs leave the facade.
 
-An adapter implements `OpenAsync`; its session implements `CountAsync`, `PageAsync`, `SingleAsync` and `DisposeAsync`. All methods accept cancellation. The repository disposes a session for every operation and export batch, including failures and stopped enumeration. Export captures one policy version but does not promise a data snapshot. See the standalone adapter example in `examples/CustomReadAdapter` for a core-only implementation surface.
+An adapter implements `OpenAsync`; its session implements `CountAsync`, `PageAsync`, `SingleAsync` and `DisposeAsync`. All methods accept cancellation. The repository owns sessions, including failures and stopped enumeration. Default exports capture one policy version but do not promise a data snapshot. See the standalone adapter example in `examples/CustomReadAdapter` for a core-only implementation surface.
 
 Cursor lists and exports require projected seek by default.
 `SeekProjectedAsync(EntitySeekPlan<T>, limit, cancellation)` executes the complete
@@ -72,6 +72,16 @@ subject function and opaque dataset label; see [cursor setup](reads.md#forward-c
 
 EF hosts use `EfEntityReadAdapter<T>` with an owned DbContext factory and expected provider identity, or provider helpers `SqliteEntityReads.Create<T>`, `SqlServerEntityReads.Create<T>` and `MySqlEntityReads.Create<T>`. A mismatched context provider fails before querying and is disposed. Provider translation failures propagate without fallback. Hosts own mappings, connection configuration, database schema, collation and migrations.
 
+For snapshot exports, use the provider helpers (or the SQLite facade). They wire
+trusted provider-owned `EfSnapshotFactory` hooks into shared EF ownership without
+adding driver dependencies to the shared package. Direct EF registrations need a
+factory to opt in; their default exports are unaffected. A factory returns an
+`EfSnapshotTransaction` and can verify transaction liveness before/after each read.
+Shared EF rejects existing connections/transactions, retry strategies, views,
+query filters, inheritance and shared/multiple-table mappings. Runtime source
+checks further restrict snapshots to verified ordinary tables. Initialization is
+single-use, and snapshot loss never opens another connection or replays output.
+
 Existing `Kkts.DataAccess.Sqlite.AuthorizedReads<T>` construction remains supported and delegates to the same repository with the SQLite executor. Read method signatures intentionally break before release: core, `IAuthorizedReadRepository<T>`, and the facade accept `ListReadRequest`, `CountReadRequest`, `DetailReadRequest`, and `ExportReadRequest` respectively. The shared request and old overloads are removed. Detail's required key now belongs to its request; count accepts only Filter and export accepts Selection/Filter/Sort without client pagination. All requests reject unmapped JSON members and bind to Read internally. Limits and detail/export result shapes are unchanged. See [read migration examples](reads.md#breaking-request-migration).
 
 Both list requests append independent `IncludeTotal=true` and
@@ -93,3 +103,49 @@ never become partial-success metadata.
 Existing SQLite configuration and trusted adapter/session contracts stay valid. Entity and policy databases can be separate: pass the SQLite policy store to the core repository and an adapter for the independently configured entity DbContext. No policy table migration is needed.
 
 See [provider support and acceptance](providers.md) for dependency versions, verified behavior and real database setup.
+
+## Trusted export lifecycle configuration
+
+Core and the SQLite facade accept a trailing optional `ExportReadConfiguration`
+(`export:`). It is immutable host configuration, not an export request member.
+Selection/filter/sort and `ExportBatch(PolicyVersion, Records)` remain unchanged.
+
+| Policy consistency | Data consistency | Behavior |
+|---|---|---|
+| CapturedPolicy (default) | BestEffort (default) | Original policy, fresh bounded entity reads |
+| AbortOnPolicyChange | BestEffort | Original policy, authoritative activation checks |
+| CapturedPolicy | Snapshot | Original policy and one entity snapshot |
+| AbortOnPolicyChange | Snapshot | One entity snapshot, independent fresh policy checks |
+
+`MaxRows` is an optional positive delivered-row cap; capped completion is a
+successful prefix, not proof of exhaustion. No total/truncation field or count
+query is added. `MaxDuration` is an optional positive elapsed deadline, using the
+configured `TimeProvider` (system by default). Batch size remains
+`ReadLimits.ExportBatchSize`. Clients cannot override these settings through JSON.
+
+Abort mode requires trusted `IActivationAwarePolicySource`: atomic content/stamp
+capture and fresh scope/resource activation reads. Positive activation revisions
+are distinct from immutable versions and must advance durably on every activation,
+including rollback to the original version. Custom captured-only sources remain
+valid for default exports. Never derive activation checks from cached captures or
+an entity snapshot.
+
+Snapshot mode independently requires `IEntitySnapshotReadSession<T>` on an owned
+session, plus projected seek (or the explicit entity compatibility mode). Snapshot
+support does not imply full-entity seek support. `BeginSnapshotAsync` owns one
+transaction until session disposal, rejects repeated initialization and incompatible
+transactions/retry settings, and must never reopen/replay after snapshot loss.
+Unsupported capabilities fail explicitly before delivery, without fallback.
+
+Best-effort batch acquisition validates scalar cardinality/types, snapshots the
+next boundary and maps DTOs while the session is owned, then disposes it before
+yield. Snapshot sessions remain owned across yields. Consumers must dispose
+enumerators even when stopping early; an elapsed deadline cannot force an
+abandoned iterator to resume and release its transaction.
+
+Duration starts at first advancement and includes consumer pauses. Use monotonic
+`TimeProvider` timestamps and timer support (positive bounds no larger than
+4,294,967,294 milliseconds); a test clock must advance both timestamps and timers,
+not UTC alone. Cancellation reaches capture, checks, opening, snapshot setup and
+queries. Caller cancellation wins over simultaneous expiry. Cleanup never uses
+the canceled operation token, and no late unchecked batch is delivered.

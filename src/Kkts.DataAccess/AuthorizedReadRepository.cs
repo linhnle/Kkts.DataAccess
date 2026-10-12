@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Kkts.Expressions;
 
 namespace Kkts.DataAccess;
@@ -16,6 +17,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
     readonly ReadLimits limits;
     readonly CursorReadConfiguration? cursor;
     readonly ReadProjectionMode projectionMode;
+    readonly ExportReadConfiguration export;
 
     public AuthorizedReadRepository(
         ResourceSchema<T> schema,
@@ -26,7 +28,8 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         string scope,
         ReadLimits? limits = null,
         CursorReadConfiguration? cursor = null,
-        ReadProjectionMode projectionMode = ReadProjectionMode.Required
+        ReadProjectionMode projectionMode = ReadProjectionMode.Required,
+        ExportReadConfiguration? export = null
     )
     {
         this.schema = schema;
@@ -37,6 +40,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         this.scope = scope;
         this.limits = limits ?? new();
         this.cursor = cursor;
+        this.export = export ?? new();
         if (!Enum.IsDefined(projectionMode))
             throw new ArgumentException("Invalid read projection mode.", nameof(projectionMode));
         this.projectionMode = projectionMode;
@@ -376,6 +380,8 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         [EnumeratorCancellation] CancellationToken cancellation = default
     )
     {
+        using var execution = new ExportExecution(export, cancellation);
+        execution.Check();
         if (request.Filter != null)
             compiler.DemandCondition(request.Filter);
         request = request with
@@ -384,51 +390,182 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             Sort = request.Sort?.ToArray(),
             Filter = CursorTokens.Snapshot(request.Filter),
         };
-        var (bound, trusted) = await Capture(cancellation);
+        var activationSource =
+            export.PolicyConsistency == ExportPolicyConsistency.AbortOnPolicyChange
+                ? store as IActivationAwarePolicySource
+                    ?? throw new NotSupportedException(
+                        "The policy source does not support authoritative activation checks."
+                    )
+                : null;
+        PolicyActivationStamp? original = null;
+        BoundPolicy<T> bound;
+        TrustedContext trusted;
+        if (activationSource == null)
+            (bound, trusted) = await execution.RunAsync(Capture);
+        else
+        {
+            trusted = context();
+            var captured = await execution.RunAsync(token =>
+                activationSource.CaptureActivationAsync(scope, schema.Resource, token)
+            );
+            if (
+                captured == null
+                || captured.Policy == null
+                || captured.Stamp == null
+                || captured.Policy.Version != captured.Stamp.Version
+            )
+                throw new InvalidOperationException(
+                    "The policy source returned an invalid activation capture."
+                );
+            original = captured.Stamp;
+            bound = compiler.Bind(captured.Policy, trusted, scope, "Read");
+        }
         var fields = ValidateSelection(request.Selection, bound);
         var filter = ValidateFilter(request.Filter, bound, trusted);
         ValidateSort(request.Sort, bound);
         var plan = Plan(bound.Predicate.And(filter), request.Sort, fields);
         var seek = new EntitySeekPlan<T>(plan, null);
-        while (true)
+        IEntityReadSession<T>? snapshot = null;
+        try
         {
-            cancellation.ThrowIfCancellationRequested();
-            await using var db = await database.OpenAsync(cancellation);
-            var projected = db as IEntityProjectedSeekReadSession<T>;
-            DemandProjection(projected != null);
-            if (projected != null)
+            execution.Check();
+            if (export.DataConsistency == ExportDataConsistency.Snapshot)
             {
-                var scalars = await projected.SeekProjectedAsync(
-                    seek,
-                    limits.ExportBatchSize,
-                    cancellation
-                );
-                ValidateRows(scalars, plan, seek);
-                var records = TrimPage(scalars, limits.ExportBatchSize, limits.ExportBatchSize);
-                if (records.Length == 0)
-                    yield break;
-                seek = new(plan, records[^1].ContinuationValues);
-                yield return new(bound.Version, DtoMapper.MapValues(schema, records, fields));
-                if (records.Length < limits.ExportBatchSize)
-                    yield break;
-                continue;
+                snapshot = await OpenExportSession(execution);
+                DemandExportSeek(snapshot);
+                var capable =
+                    snapshot as IEntitySnapshotReadSession<T>
+                    ?? throw new NotSupportedException(
+                        "The entity adapter does not support export snapshots."
+                    );
+                await execution.RunAsync(token => capable.BeginSnapshotAsync(plan, token));
             }
-            var session =
-                db as IEntitySeekReadSession<T>
-                ?? throw new NotSupportedException(
-                    "The entity adapter does not support seek retrieval."
-                );
-            var rows = await session.SeekAsync(seek, limits.ExportBatchSize, cancellation);
-            if (rows.Count > limits.ExportBatchSize)
-                throw new InvalidOperationException(
-                    "The seek adapter exceeded the requested row bound."
-                );
-            if (rows.Count == 0)
-                yield break;
-            seek = Boundary(plan, rows[^1]);
-            yield return new(bound.Version, DtoMapper.Map(schema, rows, fields));
-            if (rows.Count < limits.ExportBatchSize)
-                yield break;
+            long delivered = 0;
+            while (true)
+            {
+                execution.Check();
+                if (export.MaxRows is { } cap && delivered >= cap)
+                    yield break;
+                var limit = (int)
+                    Math.Min(
+                        limits.ExportBatchSize,
+                        export.MaxRows is { } max ? max - delivered : limits.ExportBatchSize
+                    );
+                await VerifyActivation(activationSource, original, execution);
+                var batch =
+                    snapshot == null
+                        ? await AcquireExportBatch(seek, fields, limit, execution)
+                        : await ReadExportBatch(snapshot, seek, fields, limit, execution);
+                execution.Check();
+                await VerifyActivation(activationSource, original, execution);
+                execution.Check();
+                if (batch.Records.Count == 0)
+                    yield break;
+                seek = batch.Next;
+                delivered = checked(delivered + batch.Records.Count);
+                yield return new(bound.Version, batch.Records);
+                execution.Check();
+                if (batch.Records.Count < limit)
+                    yield break;
+            }
         }
+        finally
+        {
+            if (snapshot != null)
+                await snapshot.DisposeAsync();
+        }
+    }
+
+    async Task<IEntityReadSession<T>> OpenExportSession(ExportExecution execution)
+    {
+        IEntityReadSession<T>? session = null;
+        try
+        {
+            return await execution.RunAsync(async token =>
+                session = await database.OpenAsync(token)
+            );
+        }
+        catch
+        {
+            if (session != null)
+                await session.DisposeAsync();
+            throw;
+        }
+    }
+
+    void DemandExportSeek(IEntityReadSession<T> session)
+    {
+        var projected = session is IEntityProjectedSeekReadSession<T>;
+        DemandProjection(projected);
+        if (!projected && session is not IEntitySeekReadSession<T>)
+            throw new NotSupportedException("The entity adapter does not support seek retrieval.");
+    }
+
+    async Task VerifyActivation(
+        IActivationAwarePolicySource? source,
+        PolicyActivationStamp? original,
+        ExportExecution execution
+    )
+    {
+        if (source == null)
+            return;
+        var current = await execution.RunAsync(token =>
+            source.ReadActivationAsync(scope, schema.Resource, token)
+        );
+        if (current == null)
+            throw new InvalidOperationException(
+                "The policy source returned an invalid activation stamp."
+            );
+        if (
+            current.ActiveRevision == original!.ActiveRevision
+            && current.Version != original.Version
+        )
+            throw new InvalidOperationException(
+                "The policy source changed version without advancing activation revision."
+            );
+        if (current != original)
+            throw new ExportPolicyChangedException();
+    }
+
+    async Task<(IReadOnlyList<JsonElement> Records, EntitySeekPlan<T> Next)> AcquireExportBatch(
+        EntitySeekPlan<T> seek,
+        string[] fields,
+        int limit,
+        ExportExecution execution
+    )
+    {
+        await using var db = await OpenExportSession(execution);
+        return await ReadExportBatch(db, seek, fields, limit, execution);
+    }
+
+    async Task<(IReadOnlyList<JsonElement> Records, EntitySeekPlan<T> Next)> ReadExportBatch(
+        IEntityReadSession<T> db,
+        EntitySeekPlan<T> seek,
+        string[] fields,
+        int limit,
+        ExportExecution execution
+    )
+    {
+        DemandExportSeek(db);
+        if (db is IEntityProjectedSeekReadSession<T> projected)
+        {
+            var scalars = await execution.RunAsync(token =>
+                projected.SeekProjectedAsync(seek, limit, token)
+            );
+            ValidateRows(scalars, seek.Read, seek);
+            var rows = TrimPage(scalars, limit, limit);
+            var next = rows.Length == 0 ? seek : new(seek.Read, rows[^1].ContinuationValues);
+            var records = DtoMapper.MapValues(schema, rows, fields);
+            execution.Check();
+            return (records, next);
+        }
+        var entities = await execution.RunAsync(token =>
+            ((IEntitySeekReadSession<T>)db).SeekAsync(seek, limit, token)
+        );
+        var returned = TrimPage(entities, limit, limit);
+        var boundary = returned.Length == 0 ? seek : Boundary(seek.Read, returned[^1]);
+        var mapped = DtoMapper.Map(schema, returned, fields);
+        execution.Check();
+        return (mapped, boundary);
     }
 }

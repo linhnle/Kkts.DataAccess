@@ -86,7 +86,7 @@ for include_total in [False,True]:
             if endpoint.endswith('/cursor'):assert final_metadata['nextContinuationToken'] is None
 for payload in [{'selection':[]},{'sort':[]},{'offset':0},{'limit':1},{'includeTotal':False},{'includeHasMore':True}]:
     assert post_json('/employees/count',payload)[0]==400,payload
-for payload in [{'offset':0},{'limit':1},{'exportBatchSize':1},{'includeTotal':False},{'includeHasMore':True}]:
+for payload in [{'offset':0},{'limit':1},{'exportBatchSize':1},{'includeTotal':False},{'includeHasMore':True},{'policyConsistency':'CapturedPolicy'},{'dataConsistency':'BestEffort'},{'maxRows':100},{'maxDuration':'00:01:00'},{'timeProvider':{}}]:
     assert post_json('/employees/export',payload)[0]==400,payload
 for endpoint in ['/employees/list','/employees/cursor','/employees/count','/employees/export']:
     for payload in [{'action':'Read'},{'action':'Write'},{'action':'Aggregate'},{'unknown':True},{'identity':{}},{'context':{}},{'roles':[]},{'projectionMode':'AllowEntityMaterialization'},{'projectionExpression':'row => row'}]:

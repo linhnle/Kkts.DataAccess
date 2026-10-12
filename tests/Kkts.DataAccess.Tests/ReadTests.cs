@@ -65,7 +65,9 @@ public class ReadTests : IAsyncLifetime
     readonly string policyPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".db");
     readonly string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".db");
     protected virtual DbContextOptions<Database> Options =>
-        new DbContextOptionsBuilder<Database>().UseSqlite("Data Source=" + path).Options;
+        new DbContextOptionsBuilder<Database>()
+            .UseSqlite("Data Source=" + path + ";Cache=Private")
+            .Options;
     SqlitePolicyStore Store => new("Data Source=" + policyPath);
     readonly AdministrationContext admin = new("admin", "scope", true);
 
@@ -1392,8 +1394,9 @@ public class ReadTests : IAsyncLifetime
         public List<object?[]> Parameters { get; } = [];
         public List<string[]> Columns { get; } = [];
         public int Entities;
+        public Func<Task>? AfterRead;
 
-        public override ValueTask<System.Data.Common.DbDataReader> ReaderExecutedAsync(
+        public override async ValueTask<System.Data.Common.DbDataReader> ReaderExecutedAsync(
             System.Data.Common.DbCommand command,
             Microsoft.EntityFrameworkCore.Diagnostics.CommandExecutedEventData eventData,
             System.Data.Common.DbDataReader result,
@@ -1401,7 +1404,9 @@ public class ReadTests : IAsyncLifetime
         )
         {
             Columns.Add(Enumerable.Range(0, result.FieldCount).Select(result.GetName).ToArray());
-            return ValueTask.FromResult(result);
+            if (AfterRead != null)
+                await AfterRead();
+            return result;
         }
 
         public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(
@@ -1460,5 +1465,412 @@ public class ReadTests : IAsyncLifetime
             );
         }
         Assert.All(sessions, db => Assert.True(db.Disposed));
+    }
+
+    IEntityReadAdapter<CompilerTests.Employee> SnapshotAdapter(Func<DbContext> factory) =>
+        ProviderName switch
+        {
+            "Microsoft.EntityFrameworkCore.Sqlite" =>
+                SqliteEntityReads.Create<CompilerTests.Employee>(factory),
+            "Microsoft.EntityFrameworkCore.SqlServer" =>
+                SqlServer.SqlServerEntityReads.Create<CompilerTests.Employee>(factory),
+            "MySql.EntityFrameworkCore" => MySql.MySqlEntityReads.Create<CompilerTests.Employee>(
+                factory
+            ),
+            _ => throw new NotSupportedException("Unknown snapshot provider."),
+        };
+
+    async Task PrepareSnapshot()
+    {
+        await using var db = new Database(Options);
+        if (ProviderName == "Microsoft.EntityFrameworkCore.Sqlite")
+            await db.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL");
+        else if (ProviderName == "Microsoft.EntityFrameworkCore.SqlServer")
+            await db.Database.ExecuteSqlRawAsync(
+                "ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION ON"
+            );
+    }
+
+    AuthorizedReadRepository<CompilerTests.Employee> SnapshotReads(
+        List<Database> sessions,
+        ExportReadConfiguration export,
+        SeekCommands? commands = null,
+        IActivePolicySource? source = null
+    )
+    {
+        var options =
+            commands == null
+                ? Options
+                : new DbContextOptionsBuilder<Database>(Options)
+                    .AddInterceptors(commands, MaterializationCounter.Instance)
+                    .Options;
+        var adapter = SnapshotAdapter(() =>
+        {
+            var db = new Database(options);
+            sessions.Add(db);
+            return db;
+        });
+        sessions.Clear(); // Registration validates metadata in a separate, nonquerying context.
+        return new(
+            CompilerTests.Schema,
+            CompilerTests.Compiler(),
+            source ?? Store,
+            adapter,
+            () => CompilerTests.Context(),
+            "scope",
+            new(2, 100, 1),
+            export: export
+        );
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Snapshot_preserves_initial_rows_values_and_sort_after_independent_mutations(
+        bool abort
+    )
+    {
+        await PrepareSnapshot();
+        var commands = new SeekCommands();
+        var sessions = new List<Database>();
+        var reads = SnapshotReads(
+            sessions,
+            new(
+                abort
+                    ? ExportPolicyConsistency.AbortOnPolicyChange
+                    : ExportPolicyConsistency.CapturedPolicy,
+                ExportDataConsistency.Snapshot
+            ),
+            commands
+        );
+        var initial = (
+            await Reads().ListAsync(new(Selection: ["Id", "Name"], Sort: [new("Name")], Limit: 2))
+        )
+            .Records.Select(row => row.GetRawText())
+            .ToList();
+        initial.Add("""{"Id":3,"Name":"Same"}""");
+        var result = new List<string>();
+        await using var iterator = reads
+            .ExportAsync(new(Selection: ["Id", "Name"], Sort: [new("Name")]))
+            .GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        result.AddRange(iterator.Current.Records.Select(row => row.GetRawText()));
+        Assert.Single(sessions);
+        Assert.False(sessions[0].Disposed);
+        var native = sessions[0].Database.CurrentTransaction!.GetDbTransaction();
+        Assert.Equal(
+            ProviderName switch
+            {
+                "Microsoft.EntityFrameworkCore.SqlServer" => System.Data.IsolationLevel.Snapshot,
+                "MySql.EntityFrameworkCore" => System.Data.IsolationLevel.RepeatableRead,
+                _ => System.Data.IsolationLevel.Serializable,
+            },
+            native.IsolationLevel
+        );
+        await using (var writer = new Database(Options))
+        {
+            var changed = await writer
+                .Set<CompilerTests.Employee>()
+                .SingleAsync(row => row.Id == 2);
+            changed.Name = "ZZZ";
+            changed.TenantId = 2;
+            writer.Remove(
+                await writer.Set<CompilerTests.Employee>().SingleAsync(row => row.Id == 3)
+            );
+            writer.Add(
+                new CompilerTests.Employee
+                {
+                    Id = 5,
+                    TenantId = 1,
+                    Name = "AAA",
+                }
+            );
+            await writer.SaveChangesAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        while (await iterator.MoveNextAsync())
+            result.AddRange(iterator.Current.Records.Select(row => row.GetRawText()));
+        Assert.Equal(initial, result);
+        Assert.Single(sessions);
+        Assert.True(sessions[0].Disposed);
+        Assert.True(
+            native.Connection == null
+                || native.Connection.State == System.Data.ConnectionState.Closed
+        );
+        Assert.Equal(0, commands.Entities);
+        Assert.Equal(4, commands.Sql.Count);
+        Assert.All(commands.Columns, columns => Assert.Equal(new[] { "Id", "Name" }, columns));
+    }
+
+    [Theory]
+    [InlineData("cap")]
+    [InlineData("cancel")]
+    [InlineData("duration")]
+    [InlineData("dispose")]
+    [InlineData("loss")]
+    [InlineData("transaction")]
+    public async Task Snapshot_termination_releases_transaction_without_replay(string reason)
+    {
+        await PrepareSnapshot();
+        var clock = new ExportLifecycleTests.Clock();
+        var sessions = new List<Database>();
+        var commands = new SeekCommands();
+        using var cancellation = new CancellationTokenSource();
+        var reads = SnapshotReads(
+            sessions,
+            new(
+                dataConsistency: ExportDataConsistency.Snapshot,
+                maxRows: reason == "cap" ? 1 : null,
+                maxDuration: TimeSpan.FromSeconds(1),
+                timeProvider: clock
+            ),
+            commands
+        );
+        await using var iterator = reads
+            .ExportAsync(new(Selection: []), cancellation.Token)
+            .GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        Assert.Equal("{}", Assert.Single(iterator.Current.Records).GetRawText());
+        Assert.Single(sessions);
+        var native = sessions[0].Database.CurrentTransaction!.GetDbTransaction();
+        switch (reason)
+        {
+            case "cap":
+                Assert.False(await iterator.MoveNextAsync());
+                break;
+            case "cancel":
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                    await iterator.MoveNextAsync()
+                );
+                break;
+            case "duration":
+                clock.Advance(TimeSpan.FromSeconds(1));
+                await Assert.ThrowsAsync<ExportDurationExceededException>(async () =>
+                    await iterator.MoveNextAsync()
+                );
+                break;
+            case "loss":
+                await sessions[0].Database.GetDbConnection().CloseAsync();
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                    await iterator.MoveNextAsync()
+                );
+                break;
+            case "transaction":
+                await native.RollbackAsync();
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                    await iterator.MoveNextAsync()
+                );
+                break;
+            case "dispose":
+                await iterator.DisposeAsync();
+                break;
+        }
+        Assert.Single(sessions);
+        Assert.True(sessions[0].Disposed);
+        Assert.True(
+            native.Connection == null
+                || native.Connection.State == System.Data.ConnectionState.Closed
+        );
+        Assert.Single(commands.Sql);
+        Assert.Equal(0, commands.Entities);
+        Assert.Equal(new[] { "Id" }, Assert.Single(commands.Columns));
+        Assert.Equal(0, clock.Timers);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Snapshot_policy_reads_remain_authoritative_including_same_file_SQLite(
+        bool duringQuery
+    )
+    {
+        await PrepareSnapshot();
+        var source = Store;
+        if (ProviderName == "Microsoft.EntityFrameworkCore.Sqlite")
+        {
+            source = new SqlitePolicyStore("Data Source=" + path + ";Cache=Private");
+            await source.InitializeAsync();
+            await source.SaveDraftAsync(
+                admin,
+                "scope",
+                "Employee",
+                PolicyJson.Serialize(
+                    CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow))
+                ),
+                0
+            );
+            await source.PublishAsync(
+                admin,
+                "scope",
+                CompilerTests.Schema,
+                CompilerTests.Registry,
+                1,
+                0
+            );
+        }
+        var original = await source.CaptureActivationAsync("scope", "Employee");
+        async Task Activate()
+        {
+            await source.PublishAsync(
+                admin,
+                "scope",
+                CompilerTests.Schema,
+                CompilerTests.Registry,
+                1,
+                1
+            );
+            await source.RollbackAsync(
+                admin,
+                "scope",
+                CompilerTests.Schema,
+                CompilerTests.Registry,
+                original.Policy.Version,
+                2
+            );
+        }
+        var sessions = new List<Database>();
+        var commands = new SeekCommands { AfterRead = duringQuery ? Activate : null };
+        var reads = SnapshotReads(
+            sessions,
+            new(ExportPolicyConsistency.AbortOnPolicyChange, ExportDataConsistency.Snapshot),
+            commands,
+            source
+        );
+        await using var iterator = reads.ExportAsync(new(Selection: ["Name"])).GetAsyncEnumerator();
+        if (!duringQuery)
+        {
+            Assert.True(await iterator.MoveNextAsync());
+            await Activate();
+        }
+        await Assert.ThrowsAsync<ExportPolicyChangedException>(async () =>
+            await iterator.MoveNextAsync()
+        );
+        Assert.Single(commands.Sql);
+        Assert.Single(sessions);
+        Assert.True(sessions[0].Disposed);
+        Assert.Equal(
+            new(original.Policy.Version, 3),
+            await source.ReadActivationAsync("scope", "Employee")
+        );
+    }
+
+    [Fact]
+    public async Task Snapshot_initialization_is_single_owned_and_rejects_existing_reads_or_transactions()
+    {
+        await PrepareSnapshot();
+        var plan = new EntityReadPlan<CompilerTests.Employee>(
+            row => row.Id > 0,
+            [new(typeof(CompilerTests.Employee).GetProperty("Id")!, false)]
+        );
+        var adapter = SnapshotAdapter(() => new Database(Options));
+        await using (var session = await adapter.OpenAsync())
+        {
+            var snapshot = Assert.IsAssignableFrom<
+                IEntitySnapshotReadSession<CompilerTests.Employee>
+            >(session);
+            await snapshot.BeginSnapshotAsync(plan, CancellationToken.None);
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                snapshot.BeginSnapshotAsync(plan, CancellationToken.None)
+            );
+        }
+        await using (var session = await adapter.OpenAsync())
+        {
+            await session.CountAsync(plan, CancellationToken.None);
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ((IEntitySnapshotReadSession<CompilerTests.Employee>)session).BeginSnapshotAsync(
+                    plan,
+                    CancellationToken.None
+                )
+            );
+        }
+        Database? context = null;
+        adapter = SnapshotAdapter(() => context = new Database(Options));
+        await using (var session = await adapter.OpenAsync())
+        {
+            await using var existing = await context!.Database.BeginTransactionAsync();
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ((IEntitySnapshotReadSession<CompilerTests.Employee>)session).BeginSnapshotAsync(
+                    plan,
+                    CancellationToken.None
+                )
+            );
+        }
+        Assert.True(context!.Disposed);
+    }
+
+    sealed class FailedActivationSource(SqlitePolicyStore source) : IActivationAwarePolicySource
+    {
+        public bool Fail;
+
+        public Task<CapturedPolicy> CaptureAsync(
+            string scope,
+            string resource,
+            CancellationToken cancellation = default
+        ) => source.CaptureAsync(scope, resource, cancellation);
+
+        public Task<CapturedPolicyActivation> CaptureActivationAsync(
+            string scope,
+            string resource,
+            CancellationToken cancellation = default
+        ) => source.CaptureActivationAsync(scope, resource, cancellation);
+
+        public Task<PolicyActivationStamp> ReadActivationAsync(
+            string scope,
+            string resource,
+            CancellationToken cancellation = default
+        ) =>
+            Fail
+                ? throw new InvalidOperationException("authoritative source failed")
+                : source.ReadActivationAsync(scope, resource, cancellation);
+    }
+
+    [Fact]
+    public async Task Snapshot_source_check_failure_releases_real_transaction_and_suppresses_batch()
+    {
+        await PrepareSnapshot();
+        var source = new FailedActivationSource(Store);
+        var commands = new SeekCommands
+        {
+            AfterRead = () =>
+            {
+                source.Fail = true;
+                return Task.CompletedTask;
+            },
+        };
+        var sessions = new List<Database>();
+        await using var iterator = SnapshotReads(
+                sessions,
+                new(ExportPolicyConsistency.AbortOnPolicyChange, ExportDataConsistency.Snapshot),
+                commands,
+                source
+            )
+            .ExportAsync(new())
+            .GetAsyncEnumerator();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await iterator.MoveNextAsync()
+        );
+        Assert.Single(commands.Sql);
+        Assert.True(Assert.Single(sessions).Disposed);
+    }
+
+    [Fact]
+    public async Task Snapshot_provider_version_is_recorded()
+    {
+        await using var db = new Database(Options);
+        await db.Database.OpenConnectionAsync();
+        using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = ProviderName switch
+        {
+            "Microsoft.EntityFrameworkCore.Sqlite" => "SELECT sqlite_version()",
+            "Microsoft.EntityFrameworkCore.SqlServer" =>
+                "SELECT CAST(SERVERPROPERTY('ProductVersion') AS varchar(50))",
+            "MySql.EntityFrameworkCore" => "SELECT VERSION()",
+            _ => throw new NotSupportedException("Unknown provider."),
+        };
+        var version = Assert.IsType<string>(await command.ExecuteScalarAsync());
+        Assert.False(string.IsNullOrWhiteSpace(version));
+        Console.WriteLine(
+            $"Snapshot conformance provider: {ProviderName}, server version: {version}"
+        );
     }
 }

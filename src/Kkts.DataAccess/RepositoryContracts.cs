@@ -53,6 +53,12 @@ public interface IEntityReadSession<T> : IAsyncDisposable
 
 public sealed record EntitySort(PropertyInfo Property, bool Descending);
 
+public interface IEntitySnapshotReadSession<T> : IEntityReadSession<T>
+    where T : class
+{
+    Task BeginSnapshotAsync(EntityReadPlan<T> plan, CancellationToken cancellation);
+}
+
 public interface IEntitySeekReadSession<T> : IEntityReadSession<T>
     where T : class
 {

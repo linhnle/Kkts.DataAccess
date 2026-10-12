@@ -19,8 +19,8 @@ list/count/detail/export take their distinct requests, with detail's key inside
 its request and no client export pagination. Unknown JSON members are rejected;
 see [read migration](reads.md#breaking-request-migration). Updated validation
 evidence and any unavailable provider runs are recorded in
-[repository acceptance](repository-acceptance.md). Host batching and non-snapshot
-count/page/export semantics remain unchanged.
+[repository acceptance](repository-acceptance.md). Default host batching and
+best-effort exports remain unchanged; opt-in snapshots are described below.
 
 Optional pagination metadata uses the same shared session methods on every
 provider. Disabling total suppresses the aggregate entirely; offset has-more
@@ -105,6 +105,49 @@ executed scope, separately from the earlier provider baseline.
 Trusted continuation values are not DTO fields or new grants. Cursor tokens keep
 the existing encryption, host binding and active-version strategy; neither
 projection nor token possession provides permission or a database snapshot.
+
+## Export-wide snapshots
+
+Use provider helpers or the SQLite facade to register the provider-owned
+snapshot hook. Shared EF retains one owned context, connection and transaction,
+verifies a fresh session and supported model, and rejects ambient/host-owned
+transactions, preopened connections and automatic retry strategies. Snapshot
+loss/failure aborts rather than reconnecting or replaying. Disposal rolls back/
+disposes the read transaction without using a canceled operation token.
+
+The verified model is a keyed, ordinary single-table resource with mapped scalar
+output/seek properties. Views (including actual runtime views disguised as table
+mappings), external/nontransactional sources, global query filters, inheritance,
+owned/shared-table mappings and multiple-table resources are unsupported.
+Arbitrary host query hints/interceptor rewriting are outside this trusted
+execution contract. Required projection remains enforced.
+
+| Provider | Strategy | Host prerequisites |
+|---|---|---|
+| SQLite (EF 10.0.12) | Deferred read transaction; first protected read anchors the WAL snapshot | Explicit `Cache=Private`, WAL already provisioned, `read_uncommitted=0`, ordinary main-database table |
+| SQL Server 2022 (EF 10.0.12) | Explicit Snapshot isolation | `ALLOW_SNAPSHOT_ISOLATION` fully ON, ordinary local table; RCSI alone and transitional states are insufficient |
+| MySQL 8.4 (Oracle EF 10.0.9) | Explicit Repeatable Read, nonlocking consistent SELECTs | Verified InnoDB table; session/server defaults are not used as the isolation guarantee |
+
+The library never enables WAL, changes server options or converts storage engines.
+SQLite private-cache WAL readers permit independent writers to commit between
+batches, including policy publication in the same file. The MySQL driver can
+retain transaction references after rollback; an export-owned unique savepoint
+is verified before/after reads to fail closed on loss. Savepoint checks do not
+lock entity rows, alter schema, or replace the original snapshot.
+
+Snapshot timing is not the policy-capture timestamp: provider transaction/read
+semantics anchor entity data before first delivery, while policy checks use fresh
+independent connections. There is no cross-store atomic snapshot. Pauses retain
+connections and pin SQLite WAL, SQL Server version-store or InnoDB undo resources.
+Use host row/duration bounds and always dispose stopped enumerators; a timer
+cannot force cleanup of an abandoned iterator.
+
+Executed real-provider cases cover independent insertion/deletion, selected-value
+and sort-key/membership changes after first yield, original snapshot output,
+minimal projected reader columns, zero entity materializations, activation/
+rollback, source failures, cap/deadline/cancellation, early disposal, and
+connection/native-transaction loss without replay. See
+[current acceptance evidence](repository-acceptance.md#export-lifecycle-and-snapshots).
 
 ## Example setup
 

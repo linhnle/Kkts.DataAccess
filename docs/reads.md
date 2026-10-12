@@ -60,7 +60,7 @@ adapters must supply projected capabilities or explicitly allow entity
 materialization; clients still send `SortField`, not
 raw properties, ordering strings, or executable expressions.
 
-ReadLimits defaults: max page 200, max offset 1,000,000, export batch 100. Export validates selection/filter/sort, covers all matching rows from the beginning using private keyset boundaries, and retains one policy/version across host-bounded batches. Count/detail/export have no synthetic default list limit, so a smaller host page maximum does not block them (the configured export batch must still fit that maximum). Cancellation flows through capture and queries.
+ReadLimits defaults: max page 200, max offset 1,000,000, export batch 100. Export validates selection/filter/sort, traverses matching rows from the beginning using private keyset boundaries subject to host lifecycle settings, and retains one policy/version across host-bounded batches. Count/detail/export have no synthetic default list limit, so a smaller host page maximum does not block them (the configured export batch must still fit that maximum). Cancellation flows through capture and queries.
 
 ## Breaking request migration
 
@@ -92,7 +92,62 @@ entity retrieval only when the relevant projected capability is absent; a
 projected failure never retries entity loading. Standalone count remains an
 aggregate and needs no projected capability. See [adapter migration](repositories.md).
 
-Counts/pages are separate database statements; export batches hold no transaction-wide entity snapshot. Concurrent entity changes may shift offset pages or totals. Keyset traversal avoids position shifts before fixed boundaries, but changes to sort values or authorized membership can still cause gaps/repeats. Stable ordering and captured authorization do not guarantee data snapshot consistency.
+Counts/pages are separate database statements; default best-effort exports hold no transaction-wide entity snapshot. Concurrent entity changes may shift offset pages or totals. Keyset traversal avoids position shifts before fixed boundaries, but changes to sort values or authorized membership can still cause gaps/repeats. Stable ordering and captured authorization alone do not guarantee data snapshot consistency.
+
+## Export lifecycle
+
+The trailing host-only `export:` configuration selects independent policy/data
+consistency; see the [four-mode matrix](repositories.md#trusted-export-lifecycle-configuration).
+Defaults are `CapturedPolicy`, `BestEffort`, and no row/duration bounds.
+Export JSON remains Selection/Filter/Sort only; lifecycle overrides are rejected.
+
+Abort mode captures policy content and its activation stamp atomically once,
+then verifies the original stamp before every batch query (including a terminal
+empty query) and immediately before delivery after validation/mapping. It never
+rebinds permissions/context. A failed check suppresses the pending batch and
+propagates; an observed activation change raises `ExportPolicyChangedException`.
+Draft edits do not change an activation. Publish followed by rollback does.
+There is still a race between the final authoritative read and delivery: a
+later commit cannot retract delivered rows or stop consumer work on a yielded
+batch. These checkpoints are bounded cooperative revocation, not instantaneous
+or atomic streamed delivery.
+
+`MaxRows` caps delivered rows successfully. With batch size four and cap six,
+queries request four then two, and no terminal probe/count runs when the cap is
+reached. Empty-selection records still count. No count/truncation metadata is
+added to `ExportBatch`; the host must label capped prefixes appropriately.
+
+`MaxDuration` starts on the first `MoveNextAsync`, not enumerable construction,
+and includes capture, checks, opening, queries, mapping and consumer pauses.
+It uses monotonic timestamps and a `TimeProvider`-backed timer, not UTC.
+Positive durations up to 4,294,967,294 milliseconds are supported; timers round
+fractional milliseconds upward, while elapsed checks retain the exact bound.
+Expiry cancels linked work and raises `ExportDurationExceededException`, never
+successful completion, including when resuming after a capped/final short batch.
+Caller cancellation takes precedence when both are observed. Unrelated failures
+retain their original errors; late noncooperative returns cannot be delivered.
+
+Best-effort sessions dispose before yielding. Snapshot sessions retain their
+connection/transaction until completion, failure or enumerator disposal, so
+pauses pin database snapshot resources. Timer/token state is per enumerator and
+disposed with it. While suspended at yield, expiry can request cancellation but
+cannot resume/dispose the iterator or retract consumer writes. Always use
+`await foreach` or `await using` for the enumerator, including early stops.
+An abandoned undisposed enumerator has no forced-cleanup guarantee.
+
+EmployeeApp uses these trusted startup settings (environment variables use `__`
+instead of `:`): `Export:PolicyConsistency`, `Export:DataConsistency`,
+`Export:MaxRows`, `Export:MaxDuration` (`TimeSpan`, e.g. `00:05:00`). Defaults remain
+unchanged; the provider helpers wire snapshot support, with prerequisites still
+owned by the host. Settings never come from request JSON.
+
+Before response start, its lifecycle middleware returns the existing safe JSON
+error shape with HTTP 409 for policy change or 408 for elapsed duration. After
+response start it logs the typed failure and aborts NDJSON, without an error row
+or successful terminal fallback. The API retains its existing error format rather
+than introducing unrelated Problem Details/OpenAPI/service-layer changes.
+No full-export buffering is added. A previously streamed prefix cannot be
+withdrawn; applications must treat abnormal stream termination as incomplete.
 
 ## Forward cursors
 

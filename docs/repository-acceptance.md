@@ -1,5 +1,60 @@
 # Repository provider acceptance
 
+## Export lifecycle and snapshots
+
+Verification on 2026-10-12, SDK 10.0.401:
+
+- Final solution build passed with **zero warnings/errors**. The combined focused
+  lifecycle/store/repository/mapper/read/cursor/projection/seek/compiler/translation
+  selection passed **288 tests, 0 failed, 0 skipped**, including all shared real-provider
+  cases. Executed server versions were SQLite **3.53.3**, SQL Server
+  **16.0.4255.1** (2022), and MySQL **8.4.11**. CSharpier checked all 22 changed C#
+  files; strict delta validation and inherited-scenario retention checks passed.
+  All three affected main specs were reconciled; strict validation passed for
+  all five main specifications. Late timer delivery is also explicitly tested
+  against monotonic elapsed checks.
+- Synthetic EmployeeApp HTTP acceptance passed twice on fresh isolated databases:
+  unchanged defaults and `AbortOnPolicyChange`/`Snapshot` with positive row/duration
+  bounds. Inherited two-tenant lifecycle, list/count/detail/cursor/export and narrow
+  authorized field behavior remain compatible. Client lifecycle overrides were
+  rejected and continuation sidecars were absent. Both servers were stopped and
+  their database/key artifacts cleaned up. Browser acceptance was not rerun.
+- Contract/lifecycle/store/repository/read-contract selection passed **127 tests**.
+  It covers independent enumeration state, strict host-only settings, atomic
+  activation stamps, publish/rollback/reactivation, revision exhaustion, exact
+  row caps without probes/counts, both policy checkpoints, actual DTO mapping,
+  monotonic timers, caller-cancellation precedence, late returns, consumer pauses
+  and cooperative disposal. Existing captured-only custom sources remain valid.
+- Real-provider read/snapshot matrix passed **91 tests, 0 failed, 0 skipped**
+  against file-backed SQLite and configured isolated SQL Server/MySQL servers.
+  Fixture-owned databases are unique and disposed after each case. Tests provision
+  their own snapshot prerequisites; library code never changes those settings.
+- Concurrent writers insert/delete and change selected/sort/membership values
+  after first yield. All providers return the original authorized snapshot
+  sequence/values, one session/transaction, minimal reader columns, zero projected
+  entity materializations, and no replay after connection/native rollback.
+- Negative evidence includes SQLite missing WAL/private cache/dirty reads, model
+  views/query filters/retry strategies, SQL Server OFF/RCSI-only and
+  IN_TRANSITION_TO_OFF, and MySQL MyISAM. MySQL retains Repeatable Read semantics
+  with a Read Committed session default; the session variable is deliberately
+  not substituted for the active transaction's behavior.
+- The Oracle MySQL driver retains native transaction references after rollback
+  and can continue SELECTs. The approved provider hook uses a unique owned
+  savepoint checked before/after reads; native rollback now fails closed.
+  Shared EF remains driver-neutral, with provider-owned factory hooks.
+- Same-file SQLite policy publication/rollback commits while an entity snapshot
+  is held and remains visible to fresh activation reads. Source failures, row cap,
+  elapsed deadline, cancellation and early disposal release owned resources.
+- Focused real HTTP middleware/SQLite prerequisite follow-up passed **13 tests**,
+  including actual SQLite views disguised as table mappings and the unchanged
+  facade/default construction. HTTP failures return safe 409/408 JSON before
+  start; after start a delivered NDJSON prefix is followed by abnormal termination,
+  not an appended error row or successful completion. Prefixes cannot be withdrawn.
+
+These results verify ordinary keyed single-table mapped resources, not arbitrary
+views, query hints, external sources or distributed policy/entity snapshots.
+Default best-effort behavior and cursor version identity remain unchanged.
+
 ## Authorized database projection
 
 Local verification on 2026-10-12, SDK 10.0.401, after implementing and

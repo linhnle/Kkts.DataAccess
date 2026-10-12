@@ -25,7 +25,7 @@ public sealed record AuditEvent(
     string Summary
 );
 
-public sealed class SqlitePolicyStore(string connectionString) : IActivePolicySource
+public sealed class SqlitePolicyStore(string connectionString) : IActivationAwarePolicySource
 {
     public async Task InitializeAsync(CancellationToken cancellation = default)
     {
@@ -142,6 +142,7 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivePolicySo
         var head = await ReadHead(c, tx, scope, schema.Resource, cancellation);
         if (head.DraftRevision != expectedDraft || head.ActiveRevision != expectedActive)
             throw new PolicyConflictException();
+        var nextRevision = NextActivationRevision(head.ActiveRevision);
         if (head.Payload == null)
             throw new AuthorizationException("No draft exists.");
         var policy = PolicyJson.Deserialize(head.Payload);
@@ -177,7 +178,7 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivePolicySo
             schema.Resource,
             "Publish",
             head.DraftRevision,
-            head.ActiveRevision + 1,
+            nextRevision,
             version,
             "Published validated draft",
             cancellation
@@ -206,6 +207,7 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivePolicySo
         var head = await ReadHead(c, tx, scope, schema.Resource, cancellation);
         if (head.ActiveRevision != expectedActive)
             throw new PolicyConflictException();
+        var nextRevision = NextActivationRevision(head.ActiveRevision);
         var captured = await ReadVersion(c, tx, scope, schema.Resource, version, cancellation);
         if (captured.SchemaVersion != schema.Version)
             throw new AuthorizationException("Rollback schema is incompatible.");
@@ -229,7 +231,7 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivePolicySo
             schema.Resource,
             "Rollback",
             head.DraftRevision,
-            head.ActiveRevision + 1,
+            nextRevision,
             version,
             "Selected compatible immutable version",
             cancellation
@@ -238,6 +240,12 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivePolicySo
     }
 
     public async Task<CapturedPolicy> CaptureAsync(
+        string scope,
+        string resource,
+        CancellationToken cancellation = default
+    ) => (await CaptureActivationAsync(scope, resource, cancellation)).Policy;
+
+    public async Task<CapturedPolicyActivation> CaptureActivationAsync(
         string scope,
         string resource,
         CancellationToken cancellation = default
@@ -257,7 +265,32 @@ public sealed class SqlitePolicyStore(string connectionString) : IActivePolicySo
             cancellation
         );
         await tx.CommitAsync(cancellation);
-        return captured;
+        return new(captured, new(captured.Version, head.ActiveRevision));
+    }
+
+    public async Task<PolicyActivationStamp> ReadActivationAsync(
+        string scope,
+        string resource,
+        CancellationToken cancellation = default
+    )
+    {
+        await using var c = await Open(cancellation);
+        using var cmd = c.CreateCommand();
+        cmd.CommandText =
+            "SELECT ActiveVersion,ActiveRevision FROM PolicyHeads WHERE Scope=$s AND Resource=$r";
+        cmd.Parameters.AddWithValue("$s", scope);
+        cmd.Parameters.AddWithValue("$r", resource);
+        using var reader = await cmd.ExecuteReaderAsync(cancellation);
+        if (!await reader.ReadAsync(cancellation) || reader.IsDBNull(0))
+            throw new AuthorizationException("No active policy.");
+        return new(reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    static long NextActivationRevision(long revision)
+    {
+        if (revision < 0 || revision == long.MaxValue)
+            throw new InvalidOperationException("Policy activation revision cannot advance.");
+        return checked(revision + 1);
     }
 
     public async Task<IReadOnlyList<AuditEvent>> HistoryAsync(

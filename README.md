@@ -64,8 +64,30 @@ needs no projected capability. See [adapter migration](docs/repositories.md).
 
 Export uses private keyset boundaries and projected seek. Exports
 retain one captured policy/context, need no public-token configuration, expose no
-resume token, and cannot fall back to offsets. Keyset traversal is not a snapshot
-or a guarantee against changes to sort values.
+resume token, and cannot fall back to offsets. Default keyset traversal is not a
+snapshot or a guarantee against changes to sort values.
+
+Hosts can opt into independent export consistency and positive row/duration
+bounds through `ExportReadConfiguration`. EmployeeApp reads trusted startup
+settings `Export:PolicyConsistency`, `Export:DataConsistency`, `Export:MaxRows`
+and `Export:MaxDuration`; client JSON cannot select them. Defaults remain captured
+policy/best-effort with no caps. For example, after provisioning SQLite WAL:
+
+```sh
+ASPNETCORE_ENVIRONMENT=Development \
+Database='Data Source=/absolute/path/example.db;Cache=Private' \
+Export__PolicyConsistency=AbortOnPolicyChange Export__DataConsistency=Snapshot \
+Export__MaxRows=10000 Export__MaxDuration=00:05:00 \
+dotnet run --project examples/EmployeeApp --urls http://127.0.0.1:5189
+```
+
+Use the [provider prerequisites](docs/providers.md#export-wide-snapshots);
+the library does not enable database settings. Capped exports are successful
+prefixes without truncation metadata. Policy changes/deadlines return explicit
+409/408 JSON errors before response start; once NDJSON output starts, they abort
+the stream without appending an error row. Already delivered prefixes are not
+retractable. Consumers must dispose enumerators and treat interrupted downloads
+as incomplete. See [export lifecycle](docs/reads.md#export-lifecycle).
 
 [Policy contract](docs/policies.md), [Employee policy](docs/employee-policy.json), [Lifecycle](docs/lifecycle.md), [Reads](docs/reads.md), [Dependencies](docs/dependencies.md), and [Acceptance results](docs/acceptance.md), [Repositories](docs/repositories.md), and [Entity providers](docs/providers.md).
 
@@ -76,7 +98,7 @@ may retrieve minimal trusted continuation sidecars, never DTO properties, with
 public token boundaries encrypted; empty nonseek output uses a constant marker.
 Explicit compatibility may materialize hidden entity data. Provider failures
 abort without unrestricted/local/entity-loading retries. Stable ordering and
-projection do not provide a data snapshot across batches.
+projection alone do not provide a data snapshot across batches.
 
 Package consumption check:
 

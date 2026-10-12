@@ -474,15 +474,17 @@ public class RepositoryTests
         Assert.Equal(counts, adapter.CountCalls);
         Assert.Equal(1, adapter.ProjectedPageCalls);
         Assert.Equal(adapter.Opened, adapter.Disposed);
-        var mode = typeof(AuthorizedReadRepository<Employee>).GetConstructors()[0].GetParameters()[
-            ^1
-        ];
+        var mode = typeof(AuthorizedReadRepository<Employee>)
+            .GetConstructors()[0]
+            .GetParameters()
+            .Single(parameter => parameter.Name == "projectionMode");
         Assert.Equal(ReadProjectionMode.Required, mode.DefaultValue);
         Assert.Equal(
             ReadProjectionMode.Required,
             typeof(Sqlite.AuthorizedReads<Employee>)
                 .GetConstructors()[0]
-                .GetParameters()[^1]
+                .GetParameters()
+                .Single(parameter => parameter.Name == "projectionMode")
                 .DefaultValue
         );
         Assert.Throws<ArgumentException>(() =>

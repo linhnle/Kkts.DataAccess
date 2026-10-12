@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using EmployeeApp;
+using EmployeeApp.Middleware;
 using Kkts.DataAccess;
 using Kkts.DataAccess.DataProtection;
 using Kkts.DataAccess.Sqlite;
@@ -52,20 +53,16 @@ var entityConnection =
     );
 var policyConnection = builder.Configuration["PolicyDatabase"] ?? connection;
 var optionsBuilder = new DbContextOptionsBuilder<EmployeeDatabase>();
-string providerIdentity;
 switch (provider)
 {
     case "Sqlite":
         optionsBuilder.UseSqlite(entityConnection);
-        providerIdentity = "Microsoft.EntityFrameworkCore.Sqlite";
         break;
     case "SqlServer":
         optionsBuilder.UseSqlServer(entityConnection);
-        providerIdentity = "Microsoft.EntityFrameworkCore.SqlServer";
         break;
     case "MySql":
         optionsBuilder.UseMySQL(entityConnection);
-        providerIdentity = "MySql.EntityFrameworkCore";
         break;
     default:
         throw new InvalidOperationException(
@@ -73,9 +70,22 @@ switch (provider)
         );
 }
 var options = optionsBuilder.Options;
-var entityAdapter = Kkts.DataAccess.EntityFrameworkCore.EfEntityReadAdapter<Employee>.Register(
-    () => new EmployeeDatabase(options),
-    providerIdentity
+IEntityReadAdapter<Employee> entityAdapter = provider switch
+{
+    "Sqlite" => SqliteEntityReads.Create<Employee>(() => new EmployeeDatabase(options)),
+    "SqlServer" => Kkts.DataAccess.SqlServer.SqlServerEntityReads.Create<Employee>(() =>
+        new EmployeeDatabase(options)
+    ),
+    "MySql" => Kkts.DataAccess.MySql.MySqlEntityReads.Create<Employee>(() =>
+        new EmployeeDatabase(options)
+    ),
+    _ => throw new InvalidOperationException("Unknown EntityProvider."),
+};
+var exportConfiguration = new ExportReadConfiguration(
+    builder.Configuration.GetValue<ExportPolicyConsistency>("Export:PolicyConsistency"),
+    builder.Configuration.GetValue<ExportDataConsistency>("Export:DataConsistency"),
+    builder.Configuration.GetValue<long?>("Export:MaxRows"),
+    builder.Configuration.GetValue<TimeSpan?>("Export:MaxDuration")
 );
 var store = new SqlitePolicyStore(policyConnection);
 var compiler = new PolicyCompiler<Employee>(
@@ -104,6 +114,15 @@ app.Use(
                         or InvalidContinuationTokenException
             )
         {
+            if (http.Response.HasStarted)
+            {
+                app.Logger.LogWarning(
+                    "Read response failed after streaming began: {Failure}",
+                    ex.GetType().Name
+                );
+                http.Abort();
+                return;
+            }
             http.Response.StatusCode =
                 ex is AuthorizationException ? 403
                 : ex is PolicyConflictException ? 409
@@ -112,6 +131,7 @@ app.Use(
         }
     }
 );
+app.UseMiddleware<ExportLifecycleMiddleware>();
 app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -153,7 +173,8 @@ IAuthorizedReadRepository<Employee> Reads(HttpContext http) =>
                 ?? throw new AuthorizationException("Authenticated subject required."),
             builder.Configuration["CursorDataset"] ?? $"synthetic-employee-{provider}-v1"
         ),
-        projectionMode: ReadProjectionMode.Required
+        projectionMode: ReadProjectionMode.Required,
+        export: exportConfiguration
     );
 string Token(HttpContext http) =>
     HtmlEncoder.Default.Encode(
