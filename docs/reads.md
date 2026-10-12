@@ -8,7 +8,7 @@ Validation precedes opening the entity database. Mandatory/Allow/Deny predicates
 
 ReadLimits defaults: max page 200, max offset 1,000,000, export batch 100. Export validates requests but covers all matching rows from offset zero and retains one policy/version across bounded batches. Cancellation flows through capture and queries.
 
-The supported provider baseline is EF Core SQLite 10.0.12. Translation/database errors propagate with no unrestricted or local-authorization fallback. Provider restrictions (including some decimal/DateTimeOffset ordering) fail explicitly. Hidden columns can be materialized inside the trusted facade; Phase 1 does not promise column projection. Kkts.Dynamic maps only permitted scalar public bindings in OneWayToDto mode, then serializes before returning results.
+The shared repository supports SQLite, SQL Server and MySQL entity adapters with SQLite policy storage; see [provider support](providers.md). The SQLite provider baseline is EF Core 10.0.12. Translation/database errors propagate with no unrestricted or local-authorization fallback. Provider restrictions (including some decimal/DateTimeOffset ordering) fail explicitly. Hidden columns can be materialized inside the trusted facade; Phase 1 does not promise column projection. Kkts.Dynamic maps only permitted scalar public bindings in OneWayToDto mode, then serializes before returning results.
 
 Counts/pages are separate database statements; export batches hold no transaction-wide entity snapshot. Concurrent entity changes may shift offsets or totals. Stable ordering and captured authorization do not guarantee data snapshot consistency.
 

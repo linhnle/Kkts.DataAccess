@@ -4,6 +4,8 @@
         <IsPackable>false</IsPackable>
     </PropertyGroup>
     <ItemGroup>
+        <ProjectReference Include="../../src/Kkts.DataAccess.SqlServer/Kkts.DataAccess.SqlServer.csproj" />
+        <ProjectReference Include="../../src/Kkts.DataAccess.MySql/Kkts.DataAccess.MySql.csproj" />
         <ProjectReference Include="../../examples/EmployeeApp/EmployeeApp.csproj" />
         <ProjectReference Include="../../src/Kkts.DataAccess.Sqlite/Kkts.DataAccess.Sqlite.csproj" />
         <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

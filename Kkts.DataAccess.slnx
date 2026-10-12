@@ -1,9 +1,13 @@
 <Solution>
     <Folder Name="/src/">
+        <Project Path="src/Kkts.DataAccess.SqlServer/Kkts.DataAccess.SqlServer.csproj" />
+        <Project Path="src/Kkts.DataAccess.MySql/Kkts.DataAccess.MySql.csproj" />
+        <Project Path="src/Kkts.DataAccess.EntityFrameworkCore/Kkts.DataAccess.EntityFrameworkCore.csproj" />
         <Project Path="src/Kkts.DataAccess/Kkts.DataAccess.csproj" />
         <Project Path="src/Kkts.DataAccess.Sqlite/Kkts.DataAccess.Sqlite.csproj" />
     </Folder>
     <Folder Name="/examples/">
+        <Project Path="examples/CustomReadAdapter/CustomReadAdapter.csproj" />
         <Project Path="examples/EmployeeApp/EmployeeApp.csproj" />
     </Folder>
     <Folder Name="/tests/">

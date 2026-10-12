@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <Version>0.1.0</Version>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+    </PropertyGroup>
+    <ItemGroup>
+        <None Include="../../docs/providers.md" Pack="true" PackagePath="README.md" />
+        <ProjectReference Include="../Kkts.DataAccess.EntityFrameworkCore/Kkts.DataAccess.EntityFrameworkCore.csproj" />
+        <PackageReference Include="MySql.EntityFrameworkCore" Version="10.0.9" />
+    </ItemGroup>
+</Project>

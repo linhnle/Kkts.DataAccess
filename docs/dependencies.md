@@ -10,6 +10,6 @@ Dynamic exposes `DynamicAssembly.DeclareClass(name, entityType, bindings)`, `Bui
 
 SQLite provider: Microsoft.EntityFrameworkCore.Sqlite 10.0.12. Tests: Microsoft.NET.Test.Sdk 17.14.1, xunit 2.9.3, xunit.runner.visualstudio 3.1.4. Exact transitive versions are recorded in checked-in package lock files.
 
-Run `dotnet restore Kkts.DataAccess.slnx --locked-mode`, `dotnet build Kkts.DataAccess.slnx --no-restore`, then `dotnet test Kkts.DataAccess.slnx --no-build`.
+Run `dotnet restore Kkts.DataAccess.slnx --locked-mode`, `dotnet build Kkts.DataAccess.slnx --no-restore`, then run the real-provider test command from [provider setup](providers.md). For SQLite/core-only checks use `dotnet test Kkts.DataAccess.slnx --no-build --filter 'Provider!=SqlServer&Provider!=MySql'`; report the remote suites as not run.
 
 Acceptance: solution restore and build succeeded with zero warnings/errors; all 27 tests passed, including predicate construction, typed public fields, nested filters, DTO mapping, metadata and serialization. See [Phase 1 acceptance](acceptance.md) for the complete matrix and browser/package evidence.

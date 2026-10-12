@@ -25,7 +25,7 @@ public sealed record AuditEvent(
     string Summary
 );
 
-public sealed class SqlitePolicyStore(string connectionString)
+public sealed class SqlitePolicyStore(string connectionString) : IActivePolicySource
 {
     public async Task InitializeAsync(CancellationToken cancellation = default)
     {

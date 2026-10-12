@@ -5,7 +5,7 @@
 ```sh
 dotnet restore Kkts.DataAccess.slnx --locked-mode
 dotnet build Kkts.DataAccess.slnx --no-restore
-dotnet test Kkts.DataAccess.slnx --no-build
+dotnet test Kkts.DataAccess.slnx --no-build --filter 'Provider!=SqlServer&Provider!=MySql'
 ASPNETCORE_ENVIRONMENT=Development dotnet run --project examples/EmployeeApp --urls http://127.0.0.1:5189
 ```
 
@@ -15,7 +15,7 @@ The designer edits nested typed conditions and independent field entries. Save u
 
 Default database: `employee.db`. Set `Database='Data Source=/absolute/path/example.db'` to isolate a clean walkthrough. For HTTP acceptance, start a fresh database on port 5189 and run `python3 scripts/example_acceptance.py` from the repository root. HTTP tests do not replace browser interaction checks.
 
-[Policy contract](docs/policies.md), [Employee policy](docs/employee-policy.json), [Lifecycle](docs/lifecycle.md), [Reads](docs/reads.md), [Dependencies](docs/dependencies.md), and [Acceptance results](docs/acceptance.md).
+[Policy contract](docs/policies.md), [Employee policy](docs/employee-policy.json), [Lifecycle](docs/lifecycle.md), [Reads](docs/reads.md), [Dependencies](docs/dependencies.md), and [Acceptance results](docs/acceptance.md), [Repositories](docs/repositories.md), and [Entity providers](docs/providers.md).
 
 Phase 1 supports reads only. Writes/projection are Phase 2; record-dependent fields, masking, relationships and aggregation are Phase 3. Hidden columns may be materialized internally. Provider failures abort without unrestricted/local fallback. Stable ordering does not provide a data snapshot across batches.
 

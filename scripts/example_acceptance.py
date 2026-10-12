@@ -1,6 +1,7 @@
 """HTTP acceptance against the local synthetic example. Does not replace browser UI acceptance."""
 import http.cookiejar,json,re,urllib.request,urllib.parse,urllib.error
-base='http://127.0.0.1:5189'
+import os
+base=os.environ.get('KDA_EXAMPLE_URL','http://127.0.0.1:5189')
 def client():return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 def request(c,path,fields=None):
     data=None if fields is None else urllib.parse.urlencode(fields).encode()

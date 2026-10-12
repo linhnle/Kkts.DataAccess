@@ -29,8 +29,46 @@ builder
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery();
 var connection = builder.Configuration["Database"] ?? "Data Source=employee.db";
-var options = new DbContextOptionsBuilder<EmployeeDatabase>().UseSqlite(connection).Options;
-var store = new SqlitePolicyStore(connection);
+var provider = builder.Configuration["EntityProvider"] ?? "Sqlite";
+if (provider is not ("Sqlite" or "SqlServer" or "MySql"))
+    throw new InvalidOperationException("Unknown EntityProvider. Use Sqlite, SqlServer or MySql.");
+var entityConnection =
+    builder.Configuration["EntityDatabase"]
+    ?? (
+        provider == "Sqlite"
+            ? connection
+            : throw new InvalidOperationException(
+                "EntityDatabase is required for the selected provider."
+            )
+    );
+var policyConnection = builder.Configuration["PolicyDatabase"] ?? connection;
+var optionsBuilder = new DbContextOptionsBuilder<EmployeeDatabase>();
+string providerIdentity;
+switch (provider)
+{
+    case "Sqlite":
+        optionsBuilder.UseSqlite(entityConnection);
+        providerIdentity = "Microsoft.EntityFrameworkCore.Sqlite";
+        break;
+    case "SqlServer":
+        optionsBuilder.UseSqlServer(entityConnection);
+        providerIdentity = "Microsoft.EntityFrameworkCore.SqlServer";
+        break;
+    case "MySql":
+        optionsBuilder.UseMySQL(entityConnection);
+        providerIdentity = "MySql.EntityFrameworkCore";
+        break;
+    default:
+        throw new InvalidOperationException(
+            "Unknown EntityProvider. Use Sqlite, SqlServer or MySql."
+        );
+}
+var options = optionsBuilder.Options;
+var entityAdapter = Kkts.DataAccess.EntityFrameworkCore.EfEntityReadAdapter<Employee>.Register(
+    () => new EmployeeDatabase(options),
+    providerIdentity
+);
+var store = new SqlitePolicyStore(policyConnection);
 var compiler = new PolicyCompiler<Employee>(
     EmployeeConfiguration.Schema,
     EmployeeConfiguration.Registry,
@@ -87,12 +125,12 @@ foreach (var tenant in new[] { 1, 2 })
         );
 }
 
-AuthorizedReads<Employee> Reads(HttpContext http) =>
-    new(
+IAuthorizedReadRepository<Employee> Reads(HttpContext http) =>
+    new AuthorizedReadRepository<Employee>(
         EmployeeConfiguration.Schema,
         compiler,
         store,
-        () => new EmployeeDatabase(options),
+        entityAdapter,
         () => EmployeeConfiguration.Context(http.User),
         EmployeeConfiguration.Scope(http.User)
     );

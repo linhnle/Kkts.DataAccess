@@ -19,6 +19,12 @@ public class Employee
 public class EmployeeDatabase(DbContextOptions<EmployeeDatabase> options) : DbContext(options)
 {
     public DbSet<Employee> Employees => Set<Employee>();
+
+    protected override void OnModelCreating(ModelBuilder model)
+    {
+        model.Entity<Employee>().Property(e => e.Id).ValueGeneratedNever();
+        model.Entity<Employee>().Property(e => e.Salary).HasPrecision(18, 2);
+    }
 }
 
 public static class EmployeeConfiguration
