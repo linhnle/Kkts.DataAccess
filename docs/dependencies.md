@@ -8,6 +8,14 @@ Expressions exposes typed `QuerySchema<T>.Field(...).Build()`, `ExpressionQueryC
 
 Dynamic exposes `DynamicAssembly.DeclareClass(name, entityType, bindings)`, `Build()`, `Class.GetBuiltType()`, and `Mapper.MapFromEntityToDto(dto, entity)`. Typed `DeclareClass<T>()`, `Class.CreateDto(entity)` and `Class.GetMetadata().ResolveField(...)` are also verified. Only approved scalar bindings use `OneWayToDto`. DTO shape creation and System.Text.Json serialization are tested; database projection is outside Phase 1.
 
+Kkts.Dynamic 2.1.0 assemblies accept declarations only before `Build()`.
+Disposal invalidates their `Class` wrappers, but a retained built `Type` remains
+usable with `Activator.CreateInstance` and `Mapper.MapFromEntityToDto`.
+`DependencyTests.Retained_dto_type_maps_after_builder_disposal` verifies mapping
+and serialization after disposal, as well as rejection of disposed wrapper access.
+The DTO cache retains built types, not builders or `Class` wrappers; see
+[cache ownership](reads.md#dto-shape-reuse).
+
 SQLite provider: Microsoft.EntityFrameworkCore.Sqlite 10.0.12. Tests: Microsoft.NET.Test.Sdk 17.14.1, xunit 2.9.3, xunit.runner.visualstudio 3.1.4. Exact transitive versions are recorded in checked-in package lock files.
 
 Run `dotnet restore Kkts.DataAccess.slnx --locked-mode`, `dotnet build Kkts.DataAccess.slnx --no-restore`, then run the real-provider test command from [provider setup](providers.md). For SQLite/core-only checks use `dotnet test Kkts.DataAccess.slnx --no-build --filter 'Provider!=SqlServer&Provider!=MySql'`; report the remote suites as not run.

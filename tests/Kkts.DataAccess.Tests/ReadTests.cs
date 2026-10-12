@@ -207,6 +207,51 @@ public class ReadTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Published_field_revocation_does_not_reuse_warmed_output_permissions()
+    {
+        var reads = Reads();
+        var warm = await reads.ListAsync(new(Limit: 1));
+        Assert.Equal(2, warm.Records[0].EnumerateObject().Count());
+        var policy = CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow));
+        policy = policy with
+        {
+            FieldEntries =
+            [
+                policy.FieldEntries[0] with
+                {
+                    Fields = new() { { FieldOperation.Select, ["Name"] } },
+                },
+            ],
+        };
+        await Store.SaveDraftAsync(admin, "scope", "Employee", PolicyJson.Serialize(policy), 1);
+        await Store.PublishAsync(
+            admin,
+            "scope",
+            CompilerTests.Schema,
+            CompilerTests.Registry,
+            2,
+            1
+        );
+        var page = await reads.ListAsync(new(Limit: 1));
+        Assert.NotEqual(warm.PolicyVersion, page.PolicyVersion);
+        Assert.Equal("{\"Name\":\"Same\"}", page.Records[0].GetRawText());
+        await Assert.ThrowsAsync<AuthorizationException>(() =>
+            reads.ListAsync(new(Selection: ["Id"], Limit: 1))
+        );
+        var detail = await reads.DetailAsync(JsonSerializer.SerializeToElement(1), new(Limit: 1));
+        Assert.Equal(page.PolicyVersion, detail.PolicyVersion);
+        Assert.Equal("{\"Name\":\"Same\"}", detail.Record!.Value.GetRawText());
+        var batches = 0;
+        await foreach (var batch in reads.ExportAsync(new(Limit: 1)))
+        {
+            batches++;
+            Assert.Equal(page.PolicyVersion, batch.PolicyVersion);
+            Assert.All(batch.Records, row => Assert.Equal("{\"Name\":\"Same\"}", row.GetRawText()));
+        }
+        Assert.Equal(2, batches);
+    }
+
+    [Fact]
     public async Task Export_retains_captured_policy_and_supports_cancellation()
     {
         var reads = Reads();

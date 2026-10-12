@@ -1,10 +1,11 @@
 using System.Text.Json;
-using Kkts.Dynamic;
 
 namespace Kkts.DataAccess;
 
 public static class DtoMapper
 {
+    internal static readonly DtoShapeCache Cache = new();
+
     public static IReadOnlyList<JsonElement> Map<T>(
         ResourceSchema<T> schema,
         IReadOnlyList<T> entities,
@@ -20,30 +21,7 @@ public static class DtoMapper
                     )
                     .ToArray()
             );
-        using var assembly = new DynamicAssembly();
-        var shape = assembly.DeclareClass(
-            "AuthorizedDto",
-            typeof(T),
-            selection.Select(name =>
-            {
-                var field = schema.Resolve(name);
-                return new PropertyBinding
-                {
-                    EntityProperty = field.Property.Name,
-                    DtoProperty = field.Name,
-                    Mode = BindingMode.OneWayToDto,
-                };
-            })
-        );
-        assembly.Build();
-        return Array.AsReadOnly(
-            entities
-                .Select(entity =>
-                {
-                    var dto = shape.CreateDto(entity);
-                    return JsonSerializer.SerializeToElement(dto, dto.GetType());
-                })
-                .ToArray()
-        );
+        var shape = Cache.GetOrBuild(DtoShapeKey.Create(schema, selection));
+        return Array.AsReadOnly(entities.Select(entity => shape.Map(entity)).ToArray());
     }
 }

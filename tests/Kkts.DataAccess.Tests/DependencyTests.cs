@@ -9,6 +9,33 @@ namespace Kkts.DataAccess.Tests;
 public class DependencyTests
 {
     [Fact]
+    public void Retained_dto_type_maps_after_builder_disposal()
+    {
+        var assembly = new DynamicAssembly();
+        var shape = assembly.DeclareClass<Employee>(
+            "RetainedEmployee",
+            b => b.Map(e => e.Name, "DisplayName", BindingMode.OneWayToDto)
+        );
+        assembly.Build();
+        var type = shape.GetBuiltType();
+        Assert.Throws<InvalidOperationException>(() =>
+            assembly.DeclareClass<Employee>("TooLate", b => b.Map(e => e.Name))
+        );
+        ((IDisposable)assembly).Dispose();
+        Assert.Throws<ObjectDisposedException>(() => shape.GetBuiltType());
+        Assert.Throws<ObjectDisposedException>(() => shape.CreateDto(new Employee()));
+        foreach (var name in new[] { "Alice", "Bob" })
+        {
+            var dto = Activator.CreateInstance(type)!;
+            Mapper.MapFromEntityToDto(dto, new Employee { Name = name, Salary = 123 });
+            Assert.Equal(
+                $"{{\"DisplayName\":\"{name}\"}}",
+                JsonSerializer.Serialize(dto, type, new JsonSerializerOptions())
+            );
+        }
+    }
+
+    [Fact]
     public void Official_packages_construct_predicates_and_serialize_only_bound_fields()
     {
         var predicate = new Filter

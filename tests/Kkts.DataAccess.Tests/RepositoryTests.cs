@@ -122,6 +122,55 @@ public class RepositoryTests
         );
 
     [Fact]
+    public async Task Warm_shapes_do_not_cache_grants_or_change_captured_export_fields()
+    {
+        var source = new Source();
+        var adapter = new RecordingAdapter();
+        var repo = Repository(source, adapter);
+        var broad = CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow));
+        var narrow = broad with
+        {
+            FieldEntries =
+            [
+                broad.FieldEntries[0] with
+                {
+                    Fields = new() { { FieldOperation.Select, ["Name"] } },
+                },
+            ],
+        };
+        var warm = await repo.ListAsync(new(Limit: 1));
+        Assert.Equal(new[] { "Id", "Name" }, warm.Records[0].EnumerateObject().Select(p => p.Name));
+        await using var export = repo.ExportAsync(new(Limit: 1)).GetAsyncEnumerator();
+        Assert.True(await export.MoveNextAsync());
+        source.Current = CompilerTests.Capture(narrow, 2);
+        var opened = adapter.Opened;
+        foreach (var selection in new[] { new[] { "Id" }, new[] { "Salary" } })
+            await Assert.ThrowsAsync<AuthorizationException>(() =>
+                repo.ListAsync(new(Selection: selection, Limit: 1))
+            );
+        Assert.Equal(opened, adapter.Opened);
+        var page = await repo.ListAsync(new(Limit: 1));
+        Assert.Equal(2, page.PolicyVersion);
+        Assert.Equal("{\"Name\":\"A\"}", page.Records[0].GetRawText());
+        var detail = await repo.DetailAsync(JsonSerializer.SerializeToElement(1), new(Limit: 1));
+        Assert.Equal(2, detail.PolicyVersion);
+        Assert.Equal("{\"Name\":\"A\"}", detail.Record!.Value.GetRawText());
+        Assert.True(await export.MoveNextAsync());
+        Assert.Equal(1, export.Current.PolicyVersion);
+        Assert.Equal(
+            new[] { "Id", "Name" },
+            export.Current.Records[0].EnumerateObject().Select(p => p.Name)
+        );
+        Assert.False(await export.MoveNextAsync());
+        await foreach (var batch in repo.ExportAsync(new(Limit: 1)))
+        {
+            Assert.Equal(2, batch.PolicyVersion);
+            Assert.All(batch.Records, row => Assert.Equal("{\"Name\":\"A\"}", row.GetRawText()));
+        }
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Fact]
     public async Task Core_repository_preserves_validation_results_and_captured_export()
     {
         var source = new Source();
