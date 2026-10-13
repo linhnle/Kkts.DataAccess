@@ -147,33 +147,57 @@ public sealed class PolicyCompiler<T>
             ValidationIdentity
         );
         CompilationTemplate template;
-        lock (templateGate)
+        bool hit = false,
+            built = false,
+            evicted = false;
+        Exception? cacheError = null;
+        try
         {
-            if (templates.TryGetValue(key, out var existing))
+            lock (templateGate)
             {
-                if (existing.Payload != captured.Payload)
-                    throw new RevisionConflictException(
-                        "Immutable policy version content changed."
-                    );
-                template = existing;
-            }
-            else
-            {
-                try
+                if (templates.TryGetValue(key, out var existing))
                 {
-                    var parsedDefinition = PolicyJson.Deserialize(captured.Payload);
-                    validator.DemandValid(parsedDefinition);
-                    template = new CompilationTemplate(captured.Payload, parsedDefinition);
+                    hit = true;
+                    if (existing.Payload != captured.Payload)
+                        throw new RevisionConflictException(
+                            "Immutable policy version content changed."
+                        );
+                    template = existing;
                 }
-                catch (InvalidRequestException ex)
+                else
                 {
-                    throw new SchemaIncompatibleException("The captured policy is invalid.", ex);
+                    built = true;
+                    try
+                    {
+                        var parsedDefinition = PolicyJson.Deserialize(captured.Payload);
+                        validator.DemandValid(parsedDefinition);
+                        template = new CompilationTemplate(captured.Payload, parsedDefinition);
+                    }
+                    catch (InvalidRequestException ex)
+                    {
+                        throw new SchemaIncompatibleException(
+                            "The captured policy is invalid.",
+                            ex
+                        );
+                    }
+                    if (templates.Count == templateCapacity)
+                    {
+                        templates.Remove(templateInsertionOrder.Dequeue());
+                        evicted = true;
+                    }
+                    templates.Add(key, template);
+                    templateInsertionOrder.Enqueue(key);
                 }
-                if (templates.Count == templateCapacity)
-                    templates.Remove(templateInsertionOrder.Dequeue());
-                templates.Add(key, template);
-                templateInsertionOrder.Enqueue(key);
             }
+        }
+        catch (Exception ex)
+        {
+            cacheError = ex;
+            throw;
+        }
+        finally
+        {
+            ReadDiagnostics.Cache("template", hit, built, evicted, cacheError);
         }
         // Privately owned validated AST is never exposed or mutated; request-bound expressions remain uncached.
         var definition = template.Definition;

@@ -11,6 +11,11 @@ capabilities, with explicit database-evidence limitations. The non-xUnit
 intentionally cannot establish database enforcement. Do not reference the kit
 from production hosts or treat passing cases as adapter certification.
 
+Reads expose opt-in BCL activities and metrics with bounded, privacy-preserving
+tags, cache outcomes, and export terminal results. See
+[instrumentation setup and contract](docs/instrumentation.md); no exporter or
+logging dependency is required by core.
+
 ```sh
 dotnet restore Kkts.DataAccess.slnx --locked-mode
 dotnet build Kkts.DataAccess.slnx --no-restore

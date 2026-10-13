@@ -11,6 +11,14 @@ public static class DtoMapper
         IReadOnlyList<ProjectedReadRow> rows,
         IReadOnlyList<string> selection
     )
+        where T : class =>
+        ReadDiagnostics.Stage("map", () => MapValuesCore(schema, rows, selection));
+
+    static IReadOnlyList<JsonElement> MapValuesCore<T>(
+        ResourceSchema<T> schema,
+        IReadOnlyList<ProjectedReadRow> rows,
+        IReadOnlyList<string> selection
+    )
         where T : class
     {
         var properties = selection.Select(name => schema.Resolve(name).Property).ToArray();
@@ -31,6 +39,13 @@ public static class DtoMapper
     }
 
     public static IReadOnlyList<JsonElement> Map<T>(
+        ResourceSchema<T> schema,
+        IReadOnlyList<T> entities,
+        IReadOnlyList<string> selection
+    )
+        where T : class => ReadDiagnostics.Stage("map", () => MapCore(schema, entities, selection));
+
+    static IReadOnlyList<JsonElement> MapCore<T>(
         ResourceSchema<T> schema,
         IReadOnlyList<T> entities,
         IReadOnlyList<string> selection

@@ -8,7 +8,7 @@ using Employee = Kkts.DataAccess.Tests.CompilerTests.Employee;
 
 namespace Kkts.DataAccess.Tests;
 
-public class RepositoryTests
+public partial class RepositoryTests
 {
     [Fact]
     public async Task Recording_extension_consumes_portable_protected_repository_scenarios()

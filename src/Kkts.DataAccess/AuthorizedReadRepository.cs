@@ -19,6 +19,54 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
     readonly ReadProjectionMode projectionMode;
     readonly ExportReadConfiguration export;
 
+    string Provider =>
+        ReadDiagnostics.Provider(
+            (database as IReadProviderCapabilitySource)?.Capabilities?.Provider
+        );
+
+    public Task<ReadPage> ListAsync(
+        ListReadRequest request,
+        CancellationToken cancellation = default
+    ) =>
+        ReadDiagnostics.Read(
+            "list",
+            Provider,
+            () => ListCore(request, cancellation),
+            result => result.Records.Count
+        );
+
+    public Task<ReadCount> CountAsync(
+        CountReadRequest request,
+        CancellationToken cancellation = default
+    ) => ReadDiagnostics.Read("count", Provider, () => CountCore(request, cancellation));
+
+    public Task<CursorReadPage> ListCursorAsync(
+        CursorListReadRequest request,
+        CancellationToken cancellation = default
+    ) =>
+        ReadDiagnostics.Read(
+            "cursor",
+            Provider,
+            () => CursorCore(request, cancellation),
+            result => result.Records.Count
+        );
+
+    public Task<ReadDetail> DetailAsync(
+        DetailReadRequest request,
+        CancellationToken cancellation = default
+    ) =>
+        ReadDiagnostics.Read(
+            "detail",
+            Provider,
+            () => DetailCore(request, cancellation),
+            result => result.Record == null ? 0 : 1
+        );
+
+    public IAsyncEnumerable<ExportBatch> ExportAsync(
+        ExportReadRequest request,
+        CancellationToken cancellation = default
+    ) => ReadDiagnostics.Export(token => ExportCore(request, token), () => Provider, cancellation);
+
     public AuthorizedReadRepository(
         ResourceSchema<T> schema,
         PolicyCompiler<T> compiler,
@@ -107,12 +155,28 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         CancellationToken token
     )
     {
-        var trusted = await CaptureContext(token);
-        var capturedScope = scope(trusted);
-        var captured = await store.CaptureAsync(capturedScope, schema.Resource, token);
-        token.ThrowIfCancellationRequested();
-        return (compiler.Bind(captured, trusted, capturedScope, "Read"), trusted, capturedScope);
+        var (trusted, capturedScope, captured) = await ReadDiagnostics.StageAsync(
+            "capture",
+            async () =>
+            {
+                var identity = await CaptureContext(token);
+                var capturedScope = scope(identity);
+                var captured = await store.CaptureAsync(capturedScope, schema.Resource, token);
+                token.ThrowIfCancellationRequested();
+                return (identity, capturedScope, captured);
+            }
+        );
+        return (Bind(captured, trusted, capturedScope), trusted, capturedScope);
     }
+
+    BoundPolicy<T> Bind(CapturedPolicy captured, TrustedContext trusted, string capturedScope) =>
+        ReadDiagnostics.Stage(
+            "bind",
+            () => compiler.Bind(captured, trusted, capturedScope, "Read")
+        );
+
+    static Task<TResult> Query<TResult>(Func<Task<TResult>> action) =>
+        ReadDiagnostics.StageAsync("execute", action);
 
     async Task<TrustedContext> CaptureContext(CancellationToken token)
     {
@@ -351,10 +415,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         }
     }
 
-    public async Task<ReadPage> ListAsync(
-        ListReadRequest request,
-        CancellationToken cancellation = default
-    )
+    async Task<ReadPage> ListCore(ListReadRequest request, CancellationToken cancellation = default)
     {
         DemandOperation(ReadOperations.Offset);
         var (bound, trusted, _) = await Capture(cancellation);
@@ -368,14 +429,13 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         DemandProjection(projected != null);
         var plan = Plan(bound.Predicate.And(filter), request.Sort, fields);
         await Preflight(db, plan, ReadOperations.Offset, bound, cancellation);
-        long? count = request.IncludeTotal ? await db.CountAsync(plan, cancellation) : null;
+        long? count = request.IncludeTotal
+            ? await Query(() => db.CountAsync(plan, cancellation))
+            : null;
         if (projected != null)
         {
-            var rows = await projected.PageProjectedAsync(
-                plan,
-                request.Offset,
-                fetchLimit,
-                cancellation
+            var rows = await Query(() =>
+                projected.PageProjectedAsync(plan, request.Offset, fetchLimit, cancellation)
             );
             ValidateRows(rows, plan);
             var records = TrimPage(rows, request.Limit, fetchLimit);
@@ -386,7 +446,9 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
                 request.IncludeHasMore ? rows.Count > request.Limit : null
             );
         }
-        var entities = await db.PageAsync(plan, request.Offset, fetchLimit, cancellation);
+        var entities = await Query(() =>
+            db.PageAsync(plan, request.Offset, fetchLimit, cancellation)
+        );
         var returned = TrimPage(entities, request.Limit, fetchLimit);
         return new(
             bound.Version,
@@ -421,7 +483,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         return rows.Take(limit).ToArray();
     }
 
-    public async Task<ReadCount> CountAsync(
+    async Task<ReadCount> CountCore(
         CountReadRequest request,
         CancellationToken cancellation = default
     )
@@ -432,11 +494,11 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         await using var db = await database.OpenAsync(cancellation);
         var plan = Plan(bound.Predicate.And(filter), null);
         await Preflight(db, plan, ReadOperations.Count, bound, cancellation);
-        var count = await db.CountAsync(plan, cancellation);
+        var count = await Query(() => db.CountAsync(plan, cancellation));
         return new(bound.Version, count);
     }
 
-    public async Task<CursorReadPage> ListCursorAsync(
+    async Task<CursorReadPage> CursorCore(
         CursorListReadRequest request,
         CancellationToken cancellation = default
     )
@@ -512,10 +574,14 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
                 "The entity adapter does not support seek retrieval."
             );
         await Preflight(db, plan, ReadOperations.Cursor, bound, cancellation, seek);
-        long? count = request.IncludeTotal ? await db.CountAsync(plan, cancellation) : null;
+        long? count = request.IncludeTotal
+            ? await Query(() => db.CountAsync(plan, cancellation))
+            : null;
         if (projected != null)
         {
-            var scalars = await projected.SeekProjectedAsync(seek, fetchLimit, cancellation);
+            var scalars = await Query(() =>
+                projected.SeekProjectedAsync(seek, fetchLimit, cancellation)
+            );
             ValidateRows(scalars, plan, seek);
             var records = TrimPage(scalars, request.Limit, fetchLimit);
             var continuation =
@@ -534,7 +600,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
                 request.IncludeHasMore ? scalars.Count > request.Limit : null
             );
         }
-        var rows = await session!.SeekAsync(seek, fetchLimit, cancellation);
+        var rows = await Query(() => session!.SeekAsync(seek, fetchLimit, cancellation));
         var returned = TrimPage(rows, request.Limit, fetchLimit);
         var next =
             rows.Count > request.Limit
@@ -552,7 +618,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
     static EntitySeekPlan<T> Boundary(EntityReadPlan<T> read, T row) =>
         new(read, read.Sort.Select(sort => sort.Property.GetValue(row)));
 
-    public async Task<ReadDetail> DetailAsync(
+    async Task<ReadDetail> DetailCore(
         DetailReadRequest request,
         CancellationToken cancellation = default
     )
@@ -639,20 +705,20 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         await Preflight(db, plan, ReadOperations.Detail, bound, cancellation);
         if (projected != null)
         {
-            var row = await projected.SingleProjectedAsync(plan, cancellation);
+            var row = await Query(() => projected.SingleProjectedAsync(plan, cancellation));
             if (row == null)
                 return new(bound.Version, null);
             row.Validate(plan);
             return new(bound.Version, DtoMapper.MapValues(schema, [row], fields)[0]);
         }
-        var entity = await db.SingleAsync(plan, cancellation);
+        var entity = await Query(() => db.SingleAsync(plan, cancellation));
         return new(
             bound.Version,
             entity == null ? null : DtoMapper.Map(schema, new[] { entity }, fields)[0]
         );
     }
 
-    public async IAsyncEnumerable<ExportBatch> ExportAsync(
+    async IAsyncEnumerable<ExportBatch> ExportCore(
         ExportReadRequest request,
         [EnumeratorCancellation] CancellationToken cancellation = default
     )
@@ -685,11 +751,25 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             (bound, trusted, capturedScope) = await execution.RunAsync(Capture);
         else
         {
-            trusted = await execution.RunAsync(CaptureContext);
-            capturedScope = scope(trusted);
-            var captured = await execution.RunAsync(token =>
-                activationSource.CaptureActivationAsync(capturedScope, schema.Resource, token)
+            var capture = await ReadDiagnostics.StageAsync(
+                "capture",
+                async () =>
+                {
+                    var identity = await execution.RunAsync(CaptureContext);
+                    var capturedScope = scope(identity);
+                    var captured = await execution.RunAsync(token =>
+                        activationSource.CaptureActivationAsync(
+                            capturedScope,
+                            schema.Resource,
+                            token
+                        )
+                    );
+                    return (identity, capturedScope, captured);
+                }
             );
+            trusted = capture.identity;
+            capturedScope = capture.capturedScope;
+            var captured = capture.captured;
             if (
                 captured == null
                 || captured.Policy == null
@@ -700,7 +780,7 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
                     "The policy source returned an invalid activation capture."
                 );
             original = captured.Stamp;
-            bound = compiler.Bind(captured.Policy, trusted, capturedScope, "Read");
+            bound = Bind(captured.Policy, trusted, capturedScope);
         }
         var fields = ValidateSelection(request.Selection, bound);
         var filter = ValidateFilter(request.Filter, bound, trusted);
@@ -730,7 +810,10 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             {
                 execution.Check();
                 if (export.MaxRows is { } cap && delivered >= cap)
+                {
+                    ReadDiagnostics.ExportCompleted("row_cap");
                     yield break;
+                }
                 var limit = (int)
                     Math.Min(
                         limits.ExportBatchSize,
@@ -751,7 +834,14 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
                 yield return new(bound.Version, batch.Records);
                 execution.Check();
                 if (batch.Records.Count < limit)
+                {
+                    ReadDiagnostics.ExportCompleted(
+                        export.MaxRows is { } maxRows && delivered >= maxRows
+                            ? "row_cap"
+                            : "exhausted"
+                    );
                     yield break;
+                }
             }
         }
         finally
@@ -842,8 +932,8 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         );
         if (db is IEntityProjectedSeekReadSession<T> projected)
         {
-            var scalars = await execution.RunAsync(token =>
-                projected.SeekProjectedAsync(seek, limit, token)
+            var scalars = await Query(() =>
+                execution.RunAsync(token => projected.SeekProjectedAsync(seek, limit, token))
             );
             ValidateRows(scalars, seek.Read, seek);
             var rows = TrimPage(scalars, limit, limit);
@@ -852,8 +942,10 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
             execution.Check();
             return (records, next);
         }
-        var entities = await execution.RunAsync(token =>
-            ((IEntitySeekReadSession<T>)db).SeekAsync(seek, limit, token)
+        var entities = await Query(() =>
+            execution.RunAsync(token =>
+                ((IEntitySeekReadSession<T>)db).SeekAsync(seek, limit, token)
+            )
         );
         var returned = TrimPage(entities, limit, limit);
         var boundary = returned.Length == 0 ? seek : Boundary(seek.Read, returned[^1]);

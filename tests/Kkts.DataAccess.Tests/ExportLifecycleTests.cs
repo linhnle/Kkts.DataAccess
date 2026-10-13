@@ -4,7 +4,7 @@ using Employee = Kkts.DataAccess.Tests.CompilerTests.Employee;
 
 namespace Kkts.DataAccess.Tests;
 
-public class ExportLifecycleTests
+public partial class ExportLifecycleTests
 {
     [Theory]
     [InlineData(ExportPolicyConsistency.CapturedPolicy)]

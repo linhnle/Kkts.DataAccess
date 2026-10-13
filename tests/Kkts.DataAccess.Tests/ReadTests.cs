@@ -9,7 +9,7 @@ using Xunit;
 
 namespace Kkts.DataAccess.Tests;
 
-public class ReadTests : IAsyncLifetime
+public partial class ReadTests : IAsyncLifetime
 {
     public class Database(DbContextOptions<Database> options) : DbContext(options)
     {

@@ -152,21 +152,44 @@ internal sealed class DtoShapeCache
 
     internal DtoShape GetOrBuild(DtoShapeKey key)
     {
-        lock (gate)
+        bool hit = false,
+            built = false,
+            evicted = false;
+        Exception? error = null;
+        try
         {
-            if (entries.TryGetValue(key, out var existing))
-                return existing;
-            DtoShape shape;
-            using (var assembly = createAssembly())
+            lock (gate)
             {
-                buildCount++;
-                shape = key.Build(assembly);
+                if (entries.TryGetValue(key, out var existing))
+                {
+                    hit = true;
+                    return existing;
+                }
+                DtoShape shape;
+                built = true;
+                using (var assembly = createAssembly())
+                {
+                    buildCount++;
+                    shape = key.Build(assembly);
+                }
+                if (entries.Count == capacity)
+                {
+                    entries.Remove(insertionOrder.Dequeue());
+                    evicted = true;
+                }
+                entries.Add(key, shape);
+                insertionOrder.Enqueue(key);
+                return shape;
             }
-            if (entries.Count == capacity)
-                entries.Remove(insertionOrder.Dequeue());
-            entries.Add(key, shape);
-            insertionOrder.Enqueue(key);
-            return shape;
+        }
+        catch (Exception ex)
+        {
+            error = ex;
+            throw;
+        }
+        finally
+        {
+            ReadDiagnostics.Cache("dto", hit, built, evicted, error);
         }
     }
 }

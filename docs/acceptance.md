@@ -17,3 +17,44 @@ Final automated run: **27 passed, 0 failed, 0 skipped**. Solution build complete
 Reproduce automated checks with the commands in [README](../README.md). The HTTP script expects a fresh database and a Development server on port 5189. Browser checks are manual acceptance evidence; the script does not exercise DOM controls.
 
 Phase 1 covers reads. Internal materialization can include hidden columns; output contains approved scalar DTO fields only. Export captures the policy version, but concurrent data changes do not receive snapshot isolation across batches. Production identity integration remains the host's responsibility; synthetic login is Development-only.
+
+## Read instrumentation acceptance
+
+Verified on 2026-10-13 with .NET SDK 10.0.401. The
+[instrumentation contract](instrumentation.md) covers opt-in BCL activities and
+metrics without a new core exporter/logging dependency.
+
+- The focused diagnostics selection passed **42 tests**. It covers source/meter
+  scope version, all eight instrument names/types/units, ordinary and asynchronous
+  capture, all read operations, optional totals, projected/entity/custom adapter
+  execution, and real SQLite result/query/disposal parity with and without listeners.
+- Export tests verify all seven terminal outcomes in best-effort and snapshot
+  modes, first-advance failures, empty/short/capped results, cancellation/deadline
+  precedence, cleanup failure, early disposal, unadvanced/abandoned enumerators,
+  and unrelated consumer parenting across pauses. Terminal metrics occur after
+  owned cleanup, with no extra queries or invented success.
+- Both bounded caches report actual concurrent lookups/builds/evictions/failures.
+  Listener callbacks can acquire cache locks on another thread, proving callbacks
+  do not run under those locks. Sentinel tests inspect tags/events/status
+  descriptions; resource/version/provider/error churn retains finite metric series.
+- The regression command below passed **425 tests, 0 failures, 1 skipped**.
+  The skipped test is the existing opt-in DTO performance measurement
+  (`KKTS_DTO_PERFORMANCE=1`), not a diagnostics requirement. An initial parallel
+  run timed out in an HTTP-streaming test; it passed in isolation. The cache
+  lock probes were changed to dedicated threads to avoid thread-pool starvation,
+  and the complete regression rerun passed.
+- Solution build succeeded with **zero warnings and errors**. Changed C# files
+  passed CSharpier; strict OpenSpec change validation passed.
+
+```sh
+dotnet test tests/Kkts.DataAccess.Tests/Kkts.DataAccess.Tests.csproj --no-restore \
+  --filter 'FullyQualifiedName~Diagnostics&Provider!=SqlServer&Provider!=MySql'
+dotnet test tests/Kkts.DataAccess.Tests/Kkts.DataAccess.Tests.csproj --no-restore \
+  --filter 'Provider!=SqlServer&Provider!=MySql'
+dotnet build Kkts.DataAccess.slnx --no-restore
+openspec validate add-read-diagnostics-and-metrics --strict
+```
+
+SQL Server/MySQL live-database suites were excluded; their provider classification
+and shared EF implementation compile, but this run is not live-provider
+certification. Instrumentation makes no zero-allocation/zero-latency guarantee.
