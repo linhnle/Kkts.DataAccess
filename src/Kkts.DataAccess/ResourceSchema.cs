@@ -34,6 +34,7 @@ public sealed record SchemaMetadata(
     string Resource,
     string Version,
     IReadOnlyList<string> Actions,
+    IReadOnlyList<string> KeyFields,
     IReadOnlyList<FieldMetadata> Fields
 );
 
@@ -74,13 +75,13 @@ public sealed class ResourceSchema<T>
     public string Version { get; }
     public FrozenDictionary<string, ResourceField> Fields { get; }
     public FrozenSet<string> Actions { get; }
-    public ResourceField StableKey { get; }
+    public IReadOnlyList<ResourceField> KeyFields { get; }
 
     public ResourceSchema(
         string resource,
         string version,
         IEnumerable<ResourceField> fields,
-        string stableKey,
+        IEnumerable<string> keyFields,
         IEnumerable<string>? actions = null
     )
     {
@@ -106,9 +107,40 @@ public sealed class ResourceSchema<T>
         Actions = (actions ?? ["Read"]).ToFrozenSet(StringComparer.Ordinal);
         if (Actions.Count == 0 || Actions.Any(string.IsNullOrWhiteSpace))
             throw new ArgumentException("Actions are required.");
-        StableKey = Resolve(stableKey);
-        if (StableKey.Nullable || StableKey.Type == typeof(bool))
-            throw new ArgumentException("Stable key must be nonnullable and orderable.");
+        ArgumentNullException.ThrowIfNull(keyFields);
+        var keys = keyFields.ToArray();
+        if (keys.Length == 0)
+            throw new InvalidRequestException(
+                "A nonempty key tuple is required.",
+                [new(DataAccessErrorCode.InvalidRequest, "/keyFields", "A key tuple is required.")]
+            );
+        var aliases = new HashSet<string>(StringComparer.Ordinal);
+        var properties = new HashSet<PropertyInfo>();
+        var bindings = new List<ResourceField>();
+        for (var index = 0; index < keys.Length; index++)
+        {
+            var path = JsonPointer.Append(
+                "/keyFields",
+                index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            );
+            if (keys[index] == null || !Fields.TryGetValue(keys[index], out var field))
+                throw new InvalidRequestException(
+                    "Unknown key field.",
+                    [new(DataAccessErrorCode.UnknownField, path, "Unknown key field.")]
+                );
+            if (
+                !aliases.Add(field.Name)
+                || !properties.Add(field.Property)
+                || field.Nullable
+                || field.Type == typeof(bool)
+            )
+                throw new InvalidRequestException(
+                    "Key fields must be distinct, nonnullable and orderable.",
+                    [new(DataAccessErrorCode.InvalidRequest, path, "Invalid key component.")]
+                );
+            bindings.Add(field);
+        }
+        KeyFields = bindings.AsReadOnly();
     }
 
     public ResourceField Resolve(string name) =>
@@ -125,6 +157,7 @@ public sealed class ResourceSchema<T>
             Resource,
             Version,
             Array.AsReadOnly(Actions.Order().ToArray()),
+            Array.AsReadOnly(KeyFields.Select(field => field.Name).ToArray()),
             Array.AsReadOnly(
                 Fields
                     .Values.OrderBy(f => f.Name)

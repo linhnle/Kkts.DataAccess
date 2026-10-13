@@ -290,7 +290,7 @@ internal static class EfModelCapabilities<T>
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(model))),
             operations,
             fields,
-            [schema.StableKey.Name],
+            schema.KeyFields.Select(field => field.Name),
             shape
         );
     }

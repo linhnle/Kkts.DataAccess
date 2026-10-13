@@ -504,7 +504,7 @@ public class CursorTokenTests
                 config,
                 ["Id", "Name"],
                 null,
-                new(row => true, [new(resource.StableKey.Property, false)]),
+                new(row => true, [new(resource.KeyFields[0].Property, false)]),
                 1
             );
         }
@@ -554,14 +554,14 @@ public class CursorTokenTests
                         [FieldOperation.Select, FieldOperation.Sort]
                     )
                 ),
-            "Id"
+            ["Id"]
         );
         Assert.NotEqual(original, Binding(altered, captured, trusted));
         var schemaVersion = new ResourceSchema<CompilerTests.Employee>(
             schema.Resource,
             "2",
             schema.Fields.Values,
-            "Id"
+            ["Id"]
         );
         Assert.NotEqual(
             original,

@@ -2,6 +2,15 @@
 
 .NET 10 record/field authorization integration using Kkts.Expressions 3.1.0 and Kkts.Dynamic 2.1.0. SQLite policy persistence and EF Core execution are separate from the core package.
 
+Adapter extension authors can use the optional, **test-only**
+[Kkts.DataAccess.Testing kit](src/Kkts.DataAccess.Testing/README.md) from any runner.
+It exercises protected repository behavior, owned cleanup and declared
+capabilities, with explicit database-evidence limitations. The non-xUnit
+[CustomReadAdapter consumer](examples/AdapterConformance) runs with
+`dotnet run --project examples/AdapterConformance`; its recording fixture
+intentionally cannot establish database enforcement. Do not reference the kit
+from production hosts or treat passing cases as adapter certification.
+
 ```sh
 dotnet restore Kkts.DataAccess.slnx --locked-mode
 dotnet build Kkts.DataAccess.slnx --no-restore
@@ -25,7 +34,9 @@ count accepts only filter (`{}` for an unfiltered count), detail carries its key
 plus selection/filter, and export accepts selection/filter/sort with host-controlled
 batching. Unknown members, action/identity overrides, and inapplicable options
 are rejected rather than ignored. The shared `ReadRequest` and old detail overload
-are removed in this pre-release breaking change. Constructors and trusted adapters
+are removed in this pre-release breaking change. Resource schemas now register
+immutable ordered key tuples (`["Id"]` for a single key); detail keys are exact
+alias-keyed objects (`{"Id":7}`), never scalars. Trusted adapter/session contracts
 remain unchanged; list metadata is nullable and standalone count now returns
 `{"policyVersion":1,"total":2}` rather than a number. Numeric consumers use
 `ReadCount.Total`. See the [migration examples](docs/reads.md#breaking-request-migration).

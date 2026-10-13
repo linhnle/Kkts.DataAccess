@@ -276,7 +276,9 @@ public class FactoryIntegrationTests : IAsyncLifetime
         );
         await repo.ListAsync(new(Limit: 1));
         await repo.CountAsync(new());
-        await repo.DetailAsync(new(System.Text.Json.JsonSerializer.SerializeToElement(1)));
+        await repo.DetailAsync(
+            new(System.Text.Json.JsonSerializer.SerializeToElement(new { Id = 1 }))
+        );
         var beforeExport = factory.Created.Count;
         var rows = 0;
         await foreach (var batch in repo.ExportAsync(new()))

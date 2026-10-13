@@ -606,6 +606,20 @@
         "resolved": "0.8.8",
         "contentHash": "UIDFkA5DC3en3tOJ3Mof11yBx9kUQLsaeo/oFdvN6Bbkr9E9+VCqfIadHci8cu+I51K2Sl7XYWVl2R/mA75NBQ=="
       },
+      "adapterconformance": {
+        "type": "Project",
+        "dependencies": {
+          "CustomReadAdapter": "[1.0.0, )",
+          "Kkts.DataAccess.DataProtection": "[0.1.0, )",
+          "Kkts.DataAccess.Testing": "[0.1.0, )"
+        }
+      },
+      "customreadadapter": {
+        "type": "Project",
+        "dependencies": {
+          "Kkts.DataAccess": "[0.1.0, )"
+        }
+      },
       "employeeapp": {
         "type": "Project",
         "dependencies": {
@@ -673,6 +687,12 @@
         "dependencies": {
           "Kkts.DataAccess.EntityFrameworkCore": "[0.1.0, )",
           "Microsoft.EntityFrameworkCore.SqlServer": "[10.0.12, )"
+        }
+      },
+      "kkts.dataaccess.testing": {
+        "type": "Project",
+        "dependencies": {
+          "Kkts.DataAccess": "[0.1.0, )"
         }
       }
     }

@@ -2,7 +2,7 @@
 
 Library input failures now use `InvalidRequestException` with stable codes and
 JSON Pointer diagnostics; forbidden field operations remain
-`AuthorizationException` (`access_denied`). Detail errors identify `/key`, not
+`AuthorizationException` (`access_denied`). Detail errors identify `/key` or `/key/<alias>`, not
 a synthetic policy rule. Inaccessible and absent details still return the same
 null result. Cursor and export errors have distinct typed codes.
 See [structured error migration](errors.md) for the optional HTTP package.
@@ -14,14 +14,14 @@ See [structured error migration](errors.md) for the optional HTTP package.
 | List | `ListReadRequest` | Selection, Filter, Sort, Offset (default 0), Limit (default 50), IncludeTotal (default true), IncludeHasMore (default false) |
 | Cursor list | `CursorListReadRequest` | Selection, Filter, Sort, Limit (default 50), ContinuationToken, IncludeTotal (default true), IncludeHasMore (default false) |
 | Count | `CountReadRequest` | Filter only |
-| Detail | `DetailReadRequest` | Required JSON scalar Key, Selection, Filter |
+| Detail | `DetailReadRequest` | Required exact alias-keyed JSON object Key, Selection, Filter |
 | Export | `ExportReadRequest` | Selection, Filter, Sort |
 
 Each request uses type-local strict JSON deserialization: unknown members, action/identity overrides, and operation-inapplicable inputs are rejected. Count rejects selection/sort/pagination; detail rejects sort/pagination; export rejects client pagination/batch overrides. Count/detail/export also reject list metadata flags. Those flags accept only JSON booleans, not null, numbers, or strings. The example returns HTTP 400 for malformed payloads and HTTP 403 for forbidden query fields.
 
 Omitted selection uses effective Select fields; [] yields empty DTOs. Explicit unknown/forbidden fields fail. Filtering/sorting require independent grants. Every nested client leaf is checked; context references and navigation/property paths absent from the schema are forbidden. Writes/aggregation and non-Read actions are unsupported even with permission metadata.
 
-Validation precedes opening the entity database and checks only applicable inputs. Count needs no Select or Sort grants; only list validates client pagination. Mandatory/Allow/Deny predicates precede client filters. Lists return an exact total before pagination only when requested; standalone count returns `Task<ReadCount>` with exact `Total` and the operation's captured `PolicyVersion`. Detail adds the host stable-key predicate without requiring a client Filter grant, but explicit client key filters still require that grant. Missing, null, or incompatible detail keys fail before entity access; excluded/nonexistent records both produce null (404 in the example). Ordering appends the host-declared unique stable key; hosts must enforce uniqueness. Invalid/missing stable-key registrations fail.
+Validation precedes opening the entity database and checks only applicable inputs. Count needs no Select or Sort grants; only list validates client pagination. Mandatory/Allow/Deny predicates precede client filters. Lists return an exact total before pagination only when requested; standalone count returns `Task<ReadCount>` with exact `Total` and the operation's captured `PolicyVersion`. Detail ANDs equality for every host key component without requiring client Filter grants; explicit client key filters still require those grants. Key must contain exactly the registered aliases, including `{"Id":7}` for single-key resources. Scalar, duplicate, extra, missing, wrong-case, null and incompatible members fail before entity access, with escaped component JSON Pointer diagnostics. Excluded/nonexistent records both produce null (404 in the example); duplicate matching rows remain an error. Empty selection still returns `{}` for a present row. Hosts must enforce joint key uniqueness.
 
 ## Optional list metadata and versioned counts
 
@@ -87,8 +87,11 @@ registered property bindings and directions through the unchanged
 `EntityReadPlan<T>`/`EntitySort` contract. The shared EF adapter applies
 Kkts.Expressions 3.1.0 structured `OrderByInfo` ordering to the authorized query
 before pagination, preserving multi-key order and directions. Repeated sort keys
-remain valid; the stable key is appended only when not explicitly present and
-does not acquire output, Filter, or Sort privileges. Existing constructor call patterns remain supported, but custom retrieval
+remain valid. Each missing physical key property is appended ascending in declared
+tuple order; an explicit alias over that property counts as present. Explicit
+directions remain unchanged: sorting LocalId descending for a TenantId/LocalId
+tuple yields LocalId descending then TenantId ascending. Implicit completion
+does not acquire output, Filter, or Sort privileges. Custom retrieval
 adapters must supply projected capabilities or explicitly allow entity
 materialization; clients still send `SortField`, not
 raw properties, ordering strings, or executable expressions.
@@ -103,7 +106,7 @@ The shared `ReadRequest` and old method overloads are removed before release. Co
 await reads.ListAsync(new ListReadRequest(Selection: ["Name"], Limit: 20));
 await reads.CountAsync(new CountReadRequest(Filter: filter)); // No selection/sort/limit.
 await reads.DetailAsync(new DetailReadRequest(
-    JsonSerializer.SerializeToElement(id), Selection: ["Name"], Filter: filter));
+    JsonSerializer.SerializeToElement(new { Id = id }), Selection: ["Name"], Filter: filter));
 await foreach (var batch in reads.ExportAsync(
     new ExportReadRequest(Selection: ["Name"], Filter: filter, Sort: [new("Name")])))
 {
@@ -182,6 +185,13 @@ No full-export buffering is added. A previously streamed prefix cannot be
 withdrawn; applications must treat abnormal stream termination as incomplete.
 
 ## Forward cursors
+
+Cursor compatibility now binds the complete ordered key aliases, physical
+properties and CLR types using the new identity format. Tokens from the
+singular-key format, reordered tuples, or changed key bindings fail explicitly;
+there is no historic-token fallback. Restart traversal and migrate schema/policy
+versions and the opaque dataset label when key identity changes. Hidden key
+values remain encrypted sidecars and are never added to permitted JSON output.
 
 `CursorListReadRequest` accepts Selection/Filter/Sort, Limit (default fifty), and
 an optional ContinuationToken and independent IncludeTotal/IncludeHasMore flags;

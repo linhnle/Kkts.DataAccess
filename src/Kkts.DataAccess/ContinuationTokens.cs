@@ -242,14 +242,20 @@ internal static class CursorTokens
         var identity = JsonSerializer.SerializeToElement(
             new
             {
-                Protocol = 1,
+                Protocol = 2,
                 scope,
                 schema.Resource,
                 SchemaVersion = schema.Version,
                 config.DatasetId,
                 subject,
                 Entity = typeof(T).AssemblyQualifiedName,
-                StableKey = schema.StableKey.Name,
+                KeyFields = schema.KeyFields.Select(field => new
+                {
+                    field.Name,
+                    Property = field.Property.Name,
+                    DeclaringType = field.Property.DeclaringType!.AssemblyQualifiedName,
+                    Type = field.Type.AssemblyQualifiedName,
+                }),
                 Fields = schema
                     .Fields.Values.OrderBy(f => f.Name, StringComparer.Ordinal)
                     .Select(f => new

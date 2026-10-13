@@ -44,7 +44,7 @@ public class TranslationTests
                     ResourceSchema<Entity>.Field("Id", e => e.Id, [FieldOperation.Select]),
                     ResourceSchema<Entity>.Field("Computed", e => e.Computed, []),
                 ],
-                "Id"
+                ["Id"]
             );
             var registry = new ContextRegistry(new Dictionary<string, Type>());
             var condition = CompilerTests.Leaf("Computed", "eq", 2);

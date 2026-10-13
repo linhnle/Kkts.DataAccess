@@ -62,7 +62,7 @@ public static class EmployeeConfiguration
             ResourceSchema<Employee>.Field("Status", e => e.Status, [FieldOperation.Filter]),
             ResourceSchema<Employee>.Field("Salary", e => e.Salary, []),
         ],
-        "Id"
+        ["Id"]
     );
     public static readonly ContextRegistry Registry = new(
         new Dictionary<string, Type>

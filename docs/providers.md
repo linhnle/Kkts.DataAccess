@@ -1,5 +1,15 @@
 # Entity providers
 
+The test-only [portable adapter conformance kit](../src/Kkts.DataAccess.Testing/README.md)
+is consumed by the recording and inherited SQLite/SQL Server/MySQL suites.
+Provider fixtures retain their own setup, exact cleanup, mappings, query/reader/
+materialization interception and provider-specific negative tests. The kit has
+no driver dependency and never provisions or deletes databases. SQL Server
+aggregate evidence distinguishes `COUNT_BIG` from row retrieval. Missing
+configuration or evidence is explicit, not a successful provider run.
+Current execution and package-consumption evidence is in
+[repository acceptance](repository-acceptance.md).
+
 Core retains Kkts.Expressions 3.1.0 and Kkts.Dynamic 2.1.0. Shared execution uses EF Core Relational 10.0.12; SQLite and SQL Server providers are 10.0.12. Oracle MySql.EntityFrameworkCore 10.0.9 targets net10.0 and depends on EF Core 10.0.9 or newer; locked restore/build verified it with 10.0.12. Policies remain in SQLite for every entity provider.
 
 | Tested behavior | SQLite | SQL Server 2022 | MySQL 8.4 |
@@ -42,12 +52,19 @@ table above. No snapshot or new translation support is implied.
 The shared EF adapter uses Kkts.Expressions 3.1.0 structured `OrderByInfo`
 ordering over the already authorized query. Public `SortField` aliases and Sort
 grants are resolved by the repository before entity access; only registered
-property bindings reach the ordering API. Multi-key directions and stable-key
-completion retain their existing contract, including deterministic ties and
+property bindings reach the ordering API. Multi-key directions and full key-tuple
+completion retain deterministic ties and
 bounded exports. Delegating expression construction does not expand provider
 type support, alter database collation/null placement, or permit local fallback.
 Custom adapters still consume the provider-neutral `EntityReadPlan<T>` without
 requiring IQueryable or Expressions.
+
+Schemas now supply immutable ordered key bindings; profiles preserve every
+alias in that order. The inherited provider suite exercises actual composite
+primary keys with duplicate individual components, nullable/mixed-direction
+ordering, hidden sidecars and all four export consistency modes. Current
+execution evidence is recorded in [repository acceptance](repository-acceptance.md).
+Hosts still guarantee joint uniqueness; registration does not create DDL.
 
 ## Seek execution
 

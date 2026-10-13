@@ -64,7 +64,7 @@ public class ExpressionsIntegrationTests
                         .MakeGenericMethod(p.PropertyType)
                         .Invoke(null, [p.Name])!
             ),
-        "Id"
+        ["Id"]
     );
     static readonly ContextRegistry Registry = new(new Dictionary<string, Type>());
     static readonly TrustedContext Trusted = new([], [], new Dictionary<string, object?>());
@@ -216,7 +216,7 @@ public class ExpressionsIntegrationTests
                     ["eq"]
                 ),
             ],
-            "key"
+            ["key"]
         );
         var compiler = new PolicyCompiler<Scalars>(
             schema,
@@ -256,7 +256,7 @@ public class ExpressionsIntegrationTests
                     ResourceSchema<Scalars>.Field("key", r => r.Id, []),
                     ResourceSchema<Scalars>.Field("KEY", r => r.Id, []),
                 ],
-                "key"
+                ["key"]
             )
         );
     }

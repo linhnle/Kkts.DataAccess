@@ -93,7 +93,7 @@ public class DtoShapeCacheTests
                     "MapperRow",
                     "1",
                     [ResourceSchema<OtherRow>.Field("id", r => r.Id, [FieldOperation.Select])],
-                    "id"
+                    ["id"]
                 ),
                 ["id"]
             ),
@@ -142,7 +142,7 @@ public class DtoShapeCacheTests
                 "Other",
                 "1",
                 [ResourceSchema<OtherRow>.Field("id", r => r.Id, [FieldOperation.Select])],
-                "id"
+                ["id"]
             ),
             ["id"]
         );
@@ -267,7 +267,7 @@ public class DtoShapeCacheTests
             "Blocking",
             "1",
             [ResourceSchema<BlockingRow>.Field("id", r => r.Id, [FieldOperation.Select])],
-            "id"
+            ["id"]
         );
         var shape = cache.GetOrBuild(DtoShapeKey.Create(schema, ["id"]));
         using var entered = new ManualResetEventSlim();

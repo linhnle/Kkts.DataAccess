@@ -138,7 +138,7 @@ public class ProviderCapabilityTests : IAsyncLifetime
                     computedOutput ? [FieldOperation.Select] : []
                 ),
             ],
-            "Id"
+            ["Id"]
         );
 
     internal static EfEntityReadAdapter<Row> Register(
@@ -305,7 +305,7 @@ public class ProviderCapabilityTests : IAsyncLifetime
         var repository = Repository(schema, adapter, source);
         await Assert.ThrowsAsync<ProviderUnsupportedException>(() => repository.ListAsync(new()));
         await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
-            repository.DetailAsync(new(JsonSerializer.SerializeToElement(1)))
+            repository.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 1 })))
         );
         await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
             repository.ListCursorAsync(new())
@@ -705,7 +705,7 @@ public class ProviderCapabilityTests : IAsyncLifetime
                     [FieldOperation.Select, FieldOperation.Filter, FieldOperation.Sort]
                 ),
             ],
-            "Id"
+            ["Id"]
         );
         var profile = SqliteEntityReads
             .Create<NativeTimeRow>(
@@ -760,7 +760,7 @@ public class ProviderCapabilityTests : IAsyncLifetime
         Assert.Equal(["TenantId", "Id"], tuple.KeyFields);
         Assert.NotEqual(profile.Identity, tuple.Identity);
         Assert.Single(profile.KeyFields);
-        Assert.Equal("Id", schema.StableKey.Name);
+        Assert.Equal("Id", schema.KeyFields[0].Name);
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             new CapabilityResult((CapabilityStatus)99, "Invalid status.")
         );

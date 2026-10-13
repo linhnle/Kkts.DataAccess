@@ -279,8 +279,10 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
     )
     {
         var fields = (sort ?? []).ToList();
-        if (fields.All(s => s.Field != schema.StableKey.Name))
-            fields.Add(new(schema.StableKey.Name));
+        var properties = fields.Select(s => schema.Resolve(s.Field).Property).ToHashSet();
+        foreach (var key in schema.KeyFields)
+            if (properties.Add(key.Property))
+                fields.Add(new(key.Name));
         return new(
             predicate,
             fields.Select(s => new EntitySort(schema.Resolve(s.Field).Property, s.Descending)),
@@ -559,25 +561,76 @@ public sealed class AuthorizedReadRepository<T> : IAuthorizedReadRepository<T>
         var (bound, trusted, _) = await Capture(cancellation);
         var fields = ValidateSelection(request.Selection, bound);
         var filter = ValidateFilter(request.Filter, bound, trusted);
-        var keyCondition = new Condition
-        {
-            Field = schema.StableKey.Name,
-            Operator = "eq",
-            Literal = request.Key,
-        };
-        // The key is a scalar request input, not a public filter node.
-        Expression<Func<T, bool>> keyFilter;
-        try
-        {
-            keyFilter = compiler.Predicate(keyCondition, trusted);
-        }
-        catch (InvalidRequestException ex)
-        {
+        if (request.Key.ValueKind != JsonValueKind.Object)
             throw new InvalidRequestException(
-                "Invalid key.",
-                ex.Diagnostics.Select(d => d with { Path = "/key" }),
-                ex
+                "Detail keys must be objects.",
+                [
+                    new(
+                        DataAccessErrorCode.InvalidRequest,
+                        "/key",
+                        "An exact key object is required."
+                    ),
+                ]
             );
+        var components = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        var aliases = schema
+            .KeyFields.Select(field => field.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var member in request.Key.EnumerateObject())
+        {
+            var path = JsonPointer.Append("/key", member.Name);
+            if (!aliases.Contains(member.Name) || !components.TryAdd(member.Name, member.Value))
+                throw new InvalidRequestException(
+                    "Invalid key member.",
+                    [
+                        new(
+                            DataAccessErrorCode.InvalidRequest,
+                            path,
+                            "Unknown or duplicate key member."
+                        ),
+                    ]
+                );
+        }
+        Expression<Func<T, bool>> keyFilter = entity => true;
+        foreach (var field in schema.KeyFields)
+        {
+            var path = JsonPointer.Append("/key", field.Name);
+            if (
+                !components.TryGetValue(field.Name, out var value)
+                || value.ValueKind == JsonValueKind.Null
+            )
+                throw new InvalidRequestException(
+                    "A key component is missing or null.",
+                    [
+                        new(
+                            DataAccessErrorCode.InvalidLiteral,
+                            path,
+                            "A nonnull key value is required."
+                        ),
+                    ]
+                );
+            try
+            {
+                keyFilter = keyFilter.And(
+                    compiler.Predicate(
+                        new Condition
+                        {
+                            Field = field.Name,
+                            Operator = "eq",
+                            Literal = value,
+                        },
+                        trusted
+                    )
+                );
+            }
+            catch (InvalidRequestException ex)
+            {
+                throw new InvalidRequestException(
+                    "Invalid key component.",
+                    ex.Diagnostics.Select(d => d with { Path = path }),
+                    ex
+                );
+            }
         }
         await using var db = await database.OpenAsync(cancellation);
         var projected = db as IEntityProjectedReadSession<T>;

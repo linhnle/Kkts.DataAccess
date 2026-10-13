@@ -292,7 +292,10 @@ app.MapGet(
         async (HttpContext http, int id) =>
         {
             var detail = await Reads(http)
-                .DetailAsync(new(JsonSerializer.SerializeToElement(id)), http.RequestAborted);
+                .DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { Id = id })),
+                    http.RequestAborted
+                );
             return detail.Record == null ? Results.NotFound() : Results.Json(detail);
         }
     )

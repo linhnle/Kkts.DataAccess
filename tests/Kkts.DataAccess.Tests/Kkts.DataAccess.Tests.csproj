@@ -4,6 +4,8 @@
         <IsPackable>false</IsPackable>
     </PropertyGroup>
     <ItemGroup>
+        <ProjectReference Include="../../examples/AdapterConformance/AdapterConformance.csproj" />
+        <ProjectReference Include="../../src/Kkts.DataAccess.Testing/Kkts.DataAccess.Testing.csproj" />
         <ProjectReference Include="../../src/Kkts.DataAccess.DependencyInjection/Kkts.DataAccess.DependencyInjection.csproj" />
         <ProjectReference Include="../../src/Kkts.DataAccess.DataProtection/Kkts.DataAccess.DataProtection.csproj" />
         <ProjectReference Include="../../src/Kkts.DataAccess.SqlServer/Kkts.DataAccess.SqlServer.csproj" />

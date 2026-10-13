@@ -905,7 +905,7 @@ public class ExportLifecycleTests
                 ResourceSchema<MappingRow>.Field("Id", row => row.Id, [FieldOperation.Select]),
                 ResourceSchema<MappingRow>.Field("Name", row => row.Name, [FieldOperation.Select]),
             ],
-            "Id"
+            ["Id"]
         );
         var policy = new PolicyDefinition(
             "Mapping",

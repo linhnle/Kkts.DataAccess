@@ -10,6 +10,27 @@ namespace Kkts.DataAccess.Tests;
 
 public class RepositoryTests
 {
+    [Fact]
+    public async Task Recording_extension_consumes_portable_protected_repository_scenarios()
+    {
+        var report =
+            await new Testing.AdapterConformanceSuite<AdapterConformance.ConformanceEntity>().RunAsync(
+                () =>
+                    new AdapterConformance.RecordingFixture()
+            );
+        Assert.DoesNotContain(
+            report.Results,
+            result => result.Status == Testing.ConformanceStatus.Failed
+        );
+        Assert.False(report.Passed);
+        Assert.Contains(
+            report.Results,
+            result =>
+                result.ScenarioId == Testing.ConformanceScenario.DatabaseEvidence
+                && result.Status == Testing.ConformanceStatus.NotRun
+        );
+    }
+
     internal sealed class AsyncContext(Func<CancellationToken, ValueTask<TrustedContext>> get)
         : ITrustedContextProvider
     {
@@ -47,7 +68,7 @@ public class RepositoryTests
         );
         await repo.ListAsync(new(Limit: 1));
         await repo.CountAsync(new());
-        await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)));
+        await repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 1 })));
         await repo.ListCursorAsync(new(Limit: 1));
         Assert.Equal(4, context.Captures);
         await using var export = repo.ExportAsync(new()).GetAsyncEnumerator();
@@ -487,6 +508,235 @@ public class RepositoryTests
             timeProvider: clock
         );
 
+    static ResourceSchema<Employee> CompositeSchema(IEnumerable<string>? keys = null) =>
+        new(
+            "Employee",
+            "1",
+            CompilerTests.Schema.Fields.Values.Append(
+                ResourceSchema<Employee>.Field("LocalAlias", row => row.Id, [FieldOperation.Sort])
+            ),
+            keys ?? ["DepartmentId", "Id"]
+        );
+
+    static AuthorizedReadRepository<Employee> CompositeRepository(
+        ResourceSchema<Employee> schema,
+        Source source,
+        RecordingAdapter adapter,
+        CursorReadConfiguration? cursor = null
+    ) =>
+        new(
+            schema,
+            new(schema, CompilerTests.Registry, CompilerTests.Reference("TenantId", "tenant")),
+            source,
+            adapter,
+            () => CompilerTests.Context(),
+            "scope",
+            new(2, 100, 1),
+            cursor,
+            ReadProjectionMode.AllowEntityMaterialization
+        );
+
+    [Theory]
+    [InlineData("1", "/key")]
+    [InlineData("{}", "/key/DepartmentId")]
+    [InlineData("""{"DepartmentId":10}""", "/key/Id")]
+    [InlineData("""{"DepartmentId":10,"Id":1,"Id":2}""", "/key/Id")]
+    [InlineData("""{"DepartmentId":10,"Id":1,"extra":2}""", "/key/extra")]
+    [InlineData("""{"departmentId":10,"Id":1}""", "/key/departmentId")]
+    [InlineData("""{"DepartmentId":null,"Id":1}""", "/key/DepartmentId")]
+    [InlineData("""{"DepartmentId":10,"Id":"1"}""", "/key/Id")]
+    [InlineData("""{"DepartmentId":10,"Id":1.5}""", "/key/Id")]
+    public async Task Composite_detail_invalid_members_open_no_session(string json, string path)
+    {
+        var adapter = new RecordingAdapter();
+        var repo = CompositeRepository(CompositeSchema(), new Source(), adapter);
+        var error = await Assert.ThrowsAsync<InvalidRequestException>(() =>
+            repo.DetailAsync(new(JsonDocument.Parse(json).RootElement))
+        );
+        Assert.Equal(path, Assert.Single(error.Diagnostics).Path);
+        Assert.Equal(0, adapter.Opened);
+    }
+
+    [Fact]
+    public async Task Composite_detail_is_joint_equality_without_implicit_field_grants()
+    {
+        var adapter = new RecordingAdapter
+        {
+            Rows =
+            [
+                new()
+                {
+                    DepartmentId = 10,
+                    Id = 1,
+                    TenantId = 1,
+                    Name = "first",
+                },
+                new()
+                {
+                    DepartmentId = 20,
+                    Id = 1,
+                    TenantId = 1,
+                    Name = "second",
+                },
+                new()
+                {
+                    DepartmentId = 10,
+                    Id = 2,
+                    TenantId = 1,
+                    Name = "denied",
+                    Status = "Inactive",
+                },
+                new()
+                {
+                    DepartmentId = 30,
+                    Id = 1,
+                    TenantId = 2,
+                    Name = "hidden",
+                },
+            ],
+        };
+        var source = new Source
+        {
+            Current = CompilerTests.Capture(
+                CompilerTests.Definition(
+                    CompilerTests.Rule("allow", Effect.Allow),
+                    CompilerTests.Rule(
+                        "deny",
+                        Effect.Deny,
+                        CompilerTests.Leaf("Status", "eq", "Inactive")
+                    )
+                )
+            ),
+        };
+        var repo = CompositeRepository(CompositeSchema(), source, adapter);
+        var key = JsonSerializer.SerializeToElement(new { DepartmentId = 20, Id = 1 });
+        var detail = await repo.DetailAsync(new(key, Selection: ["Name"]));
+        Assert.Equal("second", detail.Record!.Value.GetProperty("Name").GetString());
+        Assert.Equal(
+            "{}",
+            (await repo.DetailAsync(new(key, Selection: []))).Record!.Value.GetRawText()
+        );
+        await Assert.ThrowsAsync<AuthorizationException>(() =>
+            repo.DetailAsync(new(key, Filter: CompilerTests.Leaf("Id", "eq", 1)))
+        );
+        Assert.Null(
+            (
+                await repo.DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { DepartmentId = 20, Id = 2 }))
+                )
+            ).Record
+        );
+        Assert.Null(
+            (
+                await repo.DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { DepartmentId = 10, Id = 2 }))
+                )
+            ).Record
+        );
+        Assert.Null(
+            (
+                await repo.DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { DepartmentId = 30, Id = 1 }))
+                )
+            ).Record
+        );
+        adapter.Rows = [adapter.Rows[1], adapter.Rows[1]];
+        await Assert.ThrowsAsync<InvalidOperationException>(() => repo.DetailAsync(new(key)));
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Composite_hidden_tuple_completes_partial_alias_and_repeated_order(
+        bool projected
+    )
+    {
+        var adapter = new RecordingAdapter
+        {
+            SupportsProjectedSeek = projected,
+            Rows =
+            [
+                new()
+                {
+                    DepartmentId = 20,
+                    Id = 1,
+                    TenantId = 1,
+                    Name = "third",
+                },
+                new()
+                {
+                    DepartmentId = 10,
+                    Id = 1,
+                    TenantId = 1,
+                    Name = "second",
+                },
+                new()
+                {
+                    DepartmentId = 10,
+                    Id = 2,
+                    TenantId = 1,
+                    Name = "first",
+                },
+            ],
+        };
+        var original = CompilerTests.Definition(CompilerTests.Rule("allow", Effect.Allow));
+        var entry = original.FieldEntries[0];
+        entry.Fields[FieldOperation.Sort] = ["Name", "LocalAlias"];
+        var source = new Source { Current = CompilerTests.Capture(original) };
+        var config = Cursor();
+        var repo = CompositeRepository(CompositeSchema(), source, adapter, config);
+        SortField[] sort = [new("LocalAlias", true), new("LocalAlias", true)];
+        var list = await repo.ListAsync(new(Selection: ["Name"], Sort: sort, Limit: 2));
+        Assert.Equal(
+            ["first", "second"],
+            list.Records.Select(row => row.GetProperty("Name").GetString())
+        );
+        var names = new List<string?>();
+        string? token = null;
+        do
+        {
+            var page = await repo.ListCursorAsync(
+                new(
+                    Selection: ["Name"],
+                    Sort: sort,
+                    Limit: 1,
+                    ContinuationToken: token,
+                    IncludeTotal: false,
+                    IncludeHasMore: true
+                )
+            );
+            Assert.Null(page.Total);
+            Assert.All(page.Records, row => Assert.Single(row.EnumerateObject()));
+            names.AddRange(page.Records.Select(row => row.GetProperty("Name").GetString()));
+            token = page.NextContinuationToken;
+            Assert.Equal(token != null, page.HasMore);
+        } while (token != null);
+        Assert.Equal(["first", "second", "third"], names);
+        var exported = new List<string?>();
+        await foreach (var batch in repo.ExportAsync(new(Selection: ["Name"], Sort: sort)))
+            exported.AddRange(batch.Records.Select(row => row.GetProperty("Name").GetString()));
+        Assert.Equal(names, exported);
+        var first = await repo.ListCursorAsync(new(Selection: ["Name"], Sort: sort, Limit: 1));
+        var changed = CompositeRepository(
+            CompositeSchema(["Id", "DepartmentId"]),
+            source,
+            adapter,
+            config
+        );
+        await Assert.ThrowsAsync<InvalidContinuationTokenException>(() =>
+            changed.ListCursorAsync(
+                new(
+                    Selection: ["Name"],
+                    Sort: sort,
+                    Limit: 1,
+                    ContinuationToken: first.NextContinuationToken
+                )
+            )
+        );
+        Assert.Equal(adapter.Opened, adapter.Disposed);
+    }
+
     [Theory]
     [InlineData("warm")]
     [InlineData("cold")]
@@ -705,10 +955,12 @@ public class RepositoryTests
         Assert.True(first.HasMore);
         Assert.Single(Assert.Single(first.Records).EnumerateObject());
         var detail = await repo.DetailAsync(
-            new(JsonSerializer.SerializeToElement(1), Selection: [])
+            new(JsonSerializer.SerializeToElement(new { Id = 1 }), Selection: [])
         );
         Assert.Equal("{}", detail.Record!.Value.GetRawText());
-        Assert.Null((await repo.DetailAsync(new(JsonSerializer.SerializeToElement(3)))).Record);
+        Assert.Null(
+            (await repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 3 })))).Record
+        );
         var request = new CursorListReadRequest(Selection: [], Limit: 1, IncludeTotal: false);
         var cursor = await repo.ListCursorAsync(request);
         Assert.Equal("{}", Assert.Single(cursor.Records).GetRawText());
@@ -754,7 +1006,7 @@ public class RepositoryTests
         );
         await Assert.ThrowsAsync<ProviderUnsupportedException>(() => repo.ListAsync(new(Limit: 1)));
         await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
-            repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)))
+            repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 1 })))
         );
         await Assert.ThrowsAsync<ProviderUnsupportedException>(() =>
             repo.ListCursorAsync(new(Limit: 1))
@@ -820,7 +1072,9 @@ public class RepositoryTests
                 repo.ListAsync(new(Selection: ["Id"], Limit: 1, IncludeTotal: false))
             );
             await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                repo.DetailAsync(new(JsonSerializer.SerializeToElement(1), Selection: ["Id"]))
+                repo.DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { Id = 1 }), Selection: ["Id"])
+                )
             );
         }
         foreach (
@@ -1242,7 +1496,9 @@ public class RepositoryTests
         Assert.Equal(adapter.Opened, adapter.Disposed);
         Assert.Equal(new ReadCount(1, 2), await repo.CountAsync(new()));
         Assert.Single((await repo.ListAsync(new(Limit: 1))).Records);
-        Assert.NotNull((await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)))).Record);
+        Assert.NotNull(
+            (await repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 1 })))).Record
+        );
     }
 
     [Fact]
@@ -1462,11 +1718,11 @@ public class RepositoryTests
                 JsonSerializer.SerializeToElement<object?>(null),
                 JsonSerializer.SerializeToElement("1"),
                 JsonSerializer.SerializeToElement(1.5),
-                JsonSerializer.SerializeToElement(new { Id = 1 }),
+                JsonSerializer.SerializeToElement(new { id = 1 }),
             }
         )
             await Assert.ThrowsAsync<InvalidRequestException>(() => repo.DetailAsync(new(key)));
-        var validKey = JsonSerializer.SerializeToElement(1);
+        var validKey = JsonSerializer.SerializeToElement(new { Id = 1 });
         await Assert.ThrowsAsync<AuthorizationException>(() =>
             repo.DetailAsync(new(validKey, Selection: ["Salary"]))
         );
@@ -1555,11 +1811,11 @@ public class RepositoryTests
             2,
             (await repo.CountAsync(new(CompilerTests.Leaf("Status", "eq", "Active")))).Total
         );
-        var detail = await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)));
+        var detail = await repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 1 })));
         Assert.Equal("{}", detail.Record!.Value.GetRawText());
         var excluded = await repo.DetailAsync(
             new(
-                JsonSerializer.SerializeToElement(1),
+                JsonSerializer.SerializeToElement(new { Id = 1 }),
                 Filter: CompilerTests.Leaf("Status", "eq", "Inactive")
             )
         );
@@ -1582,7 +1838,7 @@ public class RepositoryTests
     public async Task Detail_selection_filter_and_host_key_lookup_preserve_protected_results()
     {
         var repo = Repository(new Source(), new RecordingAdapter());
-        var key = JsonSerializer.SerializeToElement(1);
+        var key = JsonSerializer.SerializeToElement(new { Id = 1 });
         var detail = await repo.DetailAsync(new(key, Selection: ["Id", "Name"]));
         Assert.Equal(
             new[] { "Id", "Name" },
@@ -1619,7 +1875,7 @@ public class RepositoryTests
         var repo = Repository(new Source(), adapter);
         await Assert.ThrowsAsync<InvalidOperationException>(() => repo.CountAsync(new()));
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)))
+            repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 1 })))
         );
         await using (var export = repo.ExportAsync(new()).GetAsyncEnumerator())
             await Assert.ThrowsAsync<InvalidOperationException>(async () =>
@@ -1660,7 +1916,7 @@ public class RepositoryTests
         var page = await repo.ListAsync(new(Limit: 1));
         Assert.Equal(2, page.PolicyVersion);
         Assert.Equal("{\"Name\":\"A\"}", page.Records[0].GetRawText());
-        var detail = await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1)));
+        var detail = await repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 1 })));
         Assert.Equal(2, detail.PolicyVersion);
         Assert.Equal("{\"Name\":\"A\"}", detail.Record!.Value.GetRawText());
         Assert.True(await export.MoveNextAsync());
@@ -1693,8 +1949,12 @@ public class RepositoryTests
         Assert.Equal(1, page.Records[0].GetProperty("Id").GetInt32());
         Assert.Equal(2, page.Records[0].EnumerateObject().Count());
         Assert.Equal(new ReadCount(1, 2), await repo.CountAsync(new()));
-        Assert.Null((await repo.DetailAsync(new(JsonSerializer.SerializeToElement(3)))).Record);
-        Assert.Null((await repo.DetailAsync(new(JsonSerializer.SerializeToElement(99)))).Record);
+        Assert.Null(
+            (await repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 3 })))).Record
+        );
+        Assert.Null(
+            (await repo.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 99 })))).Record
+        );
         Assert.Equal(
             "{}",
             (await repo.ListAsync(new(Selection: [], Limit: 1))).Records[0].GetRawText()

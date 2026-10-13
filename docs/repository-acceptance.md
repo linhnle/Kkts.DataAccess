@@ -1,5 +1,70 @@
 # Repository provider acceptance
 
+## Portable adapter conformance kit
+
+Verified on 2026-10-13 with SDK 10.0.401:
+
+- Full local regression: **393 passed, 1 intentionally skipped performance test**.
+- SQL Server/MySQL inherited suites using private isolated-server settings:
+  **75 passed, 0 failed, 0 skipped**. All original provider-specific tests remain;
+  recording, SQLite, SQL Server and MySQL now also consume the portable kit.
+- The kit runs 15 stable scenarios through public protected repositories.
+  Real-provider hooks verify exact output/continuation reader bindings,
+  protected mandatory/allow/deny query predicates, zero entity materialization,
+  exact aggregate/row-query counts and owned session disposal. SQL Server
+  `COUNT_BIG` uses the existing provider-aware aggregate classifier.
+- Intentionally broken deny, over-return, disposal, sidecar and claimed-seek
+  controls fail their matching scenarios. Failed/canceled setup disposes only
+  registered resources; teardown is reverse-order, idempotent and attempts all
+  owned handles even if one fails. Reports omit exception messages and private
+  connection/query/policy/row data.
+- Declared optional absence produces a passed rejection plus `Unsupported`
+  behavior, never a successful snapshot. Missing required scenarios/provider
+  evidence remains `NotRun` and prevents overall pass. This includes an actual
+  relational fixture with deliberately absent evidence hooks.
+- The non-xUnit console and CustomReadAdapter source compile/run against freshly
+  packed core/testing/Data Protection APIs in a separate package-only consumer
+  with an isolated package directory. Its exact report has **14 Passed,
+  1 database-evidence NotRun, overall Passed false**, as required for a recording
+  fixture. No project/friend/runner dependency is needed to consume the kit.
+- The packed testing manifest has exactly one direct dependency:
+  `Kkts.DataAccess`. Assembly checks reject runner/EF/driver/ASP.NET/DI references
+  and public internal-plan constructors; production hosts and the core-only
+  CustomReadAdapter continue without a testing-package reference.
+- Locked solution restore, solution build (**zero warnings/errors**), changed/new
+  CSharpier formatting and strict validation of both the composite-key
+  prerequisite and conformance-kit OpenSpec changes pass.
+
+These are bounded fixture observations, not certification for arbitrary adapter
+policies, schemas, data, collations or concurrency. See the
+[coverage and fixture limits](../src/Kkts.DataAccess.Testing/README.md).
+
+## Composite resource keys
+
+Verified on 2026-10-13 with SDK 10.0.401:
+
+- Focused schema/repository/token/request regression: **142 passed**.
+- Full local regression: **378 passed, 1 intentionally skipped performance test**.
+- SQL Server and MySQL inherited suites, using private local settings:
+  **71 passed, 0 failed, 0 skipped**. This includes the five new composite
+  provider cases per provider, also run on SQLite.
+- Composite primary-key tables contain duplicate individual components.
+  Protected object detail lookup, offset/cursor/export sequence equality,
+  nullable and repeated mixed-direction sorting, hidden tuple sidecars,
+  denied/cross-tenant rows, reader-column restrictions and zero entity
+  materialization are verified.
+- All four policy/data export combinations retain tuple traversal, independent
+  mutation/snapshot behavior, exact caps without a terminal probe, deadlines,
+  activation-change abort, and owned-session cleanup.
+- Solution build passes with **zero warnings/errors**; strict change validation
+  passes. Earlier evidence below records historical single-key contracts;
+  the current registration uses immutable ordered `KeyFields` and exact object
+  detail keys, including single-component resources.
+
+This evidence does not prove uniqueness in arbitrary host data or translation
+for untested models, collations or types. Hosts own uniqueness constraints and
+schema/policy/dataset migration; old singular-key cursor identities are invalid.
+
 ## Model/provider capabilities
 
 Verified on 2026-10-12 with SDK 10.0.401:

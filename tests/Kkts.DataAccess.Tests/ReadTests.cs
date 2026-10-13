@@ -15,6 +15,12 @@ public class ReadTests : IAsyncLifetime
     {
         public bool Disposed { get; private set; }
 
+        public override void Dispose()
+        {
+            Disposed = true;
+            base.Dispose();
+        }
+
         public override ValueTask DisposeAsync()
         {
             Disposed = true;
@@ -29,7 +35,704 @@ public class ReadTests : IAsyncLifetime
             b.Entity<Boundary>().Property(e => e.Id).ValueGeneratedNever();
             b.Entity<Boundary>().Property(e => e.Amount).HasPrecision(18, 2);
             b.Entity<Boundary>().Property(e => e.Converted).HasConversion<string>();
+            b.Entity<CompositeRow>().HasKey(row => new { row.GroupId, row.LocalId });
+            b.Entity<CompositeRow>().Property(row => row.LocalId).ValueGeneratedNever();
+            b.Entity<AdapterConformance.ConformanceEntity>()
+                .HasKey(row => new { row.GroupId, row.LocalId });
+            b.Entity<AdapterConformance.ConformanceEntity>()
+                .Property(row => row.LocalId)
+                .ValueGeneratedNever();
         }
+    }
+
+    public class CompositeRow
+    {
+        public int GroupId { get; set; }
+        public int LocalId { get; set; }
+        public int TenantId { get; set; }
+        public int? Rank { get; set; }
+        public string Label { get; set; } = "";
+        public bool Denied { get; set; }
+        public string Secret { get; set; } = "must not materialize";
+    }
+
+    [Fact]
+    public async Task Provider_consumes_runner_neutral_conformance_checks_with_real_evidence()
+    {
+        var report =
+            await new Testing.AdapterConformanceSuite<AdapterConformance.ConformanceEntity>().RunAsync(
+                () =>
+                    new ProviderConformanceFixture(this)
+            );
+        Assert.True(report.Passed, System.Text.Json.JsonSerializer.Serialize(report));
+        Assert.Equal(Testing.ConformanceScenario.All.Count, report.Results.Count);
+    }
+
+    [Fact]
+    public async Task Provider_missing_conformance_evidence_is_explicitly_not_run()
+    {
+        var report =
+            await new Testing.AdapterConformanceSuite<AdapterConformance.ConformanceEntity>().RunAsync(
+                () => new ProviderConformanceFixture(this, omitEvidence: true),
+                [Testing.ConformanceScenario.DatabaseEvidence]
+            );
+        Assert.Equal(
+            Testing.ConformanceStatus.NotRun,
+            Assert
+                .Single(
+                    report.Results,
+                    result => result.ScenarioId == Testing.ConformanceScenario.DatabaseEvidence
+                )
+                .Status
+        );
+        Assert.False(report.Passed);
+    }
+
+    sealed class ProviderConformanceFixture(ReadTests owner, bool omitEvidence = false)
+        : Testing.IAdapterConformanceFixture<AdapterConformance.ConformanceEntity>
+    {
+        readonly SeekCommands commands = new();
+        readonly List<Database> sessions = [];
+        IContinuationTokenProtector? protector;
+        bool translationFailure;
+        int translationAttempts;
+        Version? providerVersion;
+        HashSet<string> expectedColumns = [];
+        public Testing.ConformanceBindings<AdapterConformance.ConformanceEntity> Bindings { get; } =
+            new(
+                row => row.Id,
+                row => row.TenantId,
+                row => row.GroupId,
+                row => row.LocalId,
+                row => row.Name,
+                row => row.Rank,
+                row => row.Denied
+            );
+        public Testing.ConformanceCapabilities Capabilities => new(Snapshot: true);
+        public Testing.ConformanceProvider Provider =>
+            owner.ProviderName switch
+            {
+                "Microsoft.EntityFrameworkCore.Sqlite" => Testing.ConformanceProvider.Sqlite,
+                "Microsoft.EntityFrameworkCore.SqlServer" => Testing.ConformanceProvider.SqlServer,
+                "MySql.EntityFrameworkCore" => Testing.ConformanceProvider.MySql,
+                _ => throw new NotSupportedException("Unknown conformance provider."),
+            };
+        public Version? ProviderVersion => providerVersion;
+        public IContinuationTokenProtector ContinuationProtector =>
+            protector ?? throw new InvalidOperationException("Fixture setup has not run.");
+
+        public async ValueTask SetupAsync(
+            IReadOnlyList<Testing.ConformanceRecord> records,
+            Testing.OwnedFixtureResources ownership,
+            CancellationToken token
+        )
+        {
+            await owner.PrepareSnapshot();
+            await using var setup = new Database(owner.Options);
+            await setup.Set<AdapterConformance.ConformanceEntity>().ExecuteDeleteAsync(token);
+            setup.AddRange(records.Select(AdapterConformance.ConformanceEntity.From));
+            await setup.SaveChangesAsync(token);
+            protector = new DataProtection.DataProtectionContinuationTokenProtector(
+                new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider()
+            );
+            commands.ColumnCheck = (sql, columns) =>
+                owner.IsCountQuery(sql)
+                || (
+                    expectedColumns.Count == 0
+                        ? columns.Length == 1
+                            && !typeof(AdapterConformance.ConformanceEntity)
+                                .GetProperties()
+                                .Any(property => property.Name == columns[0])
+                        : columns.Length == expectedColumns.Count
+                            && columns.ToHashSet(StringComparer.Ordinal).SetEquals(expectedColumns)
+                );
+        }
+
+        Database Open()
+        {
+            var options = new DbContextOptionsBuilder<Database>(owner.Options)
+                .AddInterceptors(commands, MaterializationCounter.Instance)
+                .Options;
+            var database = new Database(options);
+            sessions.Add(database);
+            return database;
+        }
+
+        public IEntityReadAdapter<AdapterConformance.ConformanceEntity> CreateAdapter(
+            ResourceSchema<AdapterConformance.ConformanceEntity> schema
+        )
+        {
+            var operations = ReadOperations.All | ReadOperations.Snapshot;
+            IEntityReadAdapter<AdapterConformance.ConformanceEntity> adapter =
+                owner.ProviderName switch
+                {
+                    "Microsoft.EntityFrameworkCore.Sqlite" =>
+                        SqliteEntityReads.Create<AdapterConformance.ConformanceEntity>(
+                            schema,
+                            Open,
+                            operations
+                        ),
+                    "Microsoft.EntityFrameworkCore.SqlServer" =>
+                        SqlServer.SqlServerEntityReads.Create<AdapterConformance.ConformanceEntity>(
+                            schema,
+                            Open,
+                            operations
+                        ),
+                    "MySql.EntityFrameworkCore" =>
+                        MySql.MySqlEntityReads.Create<AdapterConformance.ConformanceEntity>(
+                            schema,
+                            Open,
+                            operations
+                        ),
+                    _ => throw new NotSupportedException("Unknown conformance provider."),
+                };
+            if (
+                adapter
+                    is not IReadProviderCapabilitySource
+                    {
+                        Capabilities: ReadProviderCapabilities profile
+                    }
+                || !Version.TryParse(
+                    profile.ImplementationVersion.Split('+')[0],
+                    out providerVersion
+                )
+            )
+                throw new InvalidOperationException("Missing provider implementation version.");
+            return new CustomReadAdapter.CustomAdapter<AdapterConformance.ConformanceEntity>(
+                async token =>
+                {
+                    if (!translationFailure)
+                        return new TrackedSession(this, await adapter.OpenAsync(token));
+                    translationFailure = false;
+                    return new TranslationFailureSession(this, Open());
+                }
+            );
+        }
+
+        public async ValueTask RenameAsync(int id, string name, CancellationToken token)
+        {
+            await using var mutation = new Database(owner.Options);
+            var row = await mutation
+                .Set<AdapterConformance.ConformanceEntity>()
+                .SingleAsync(row => row.Id == id, token);
+            row.Name = name;
+            await mutation.SaveChangesAsync(token);
+        }
+
+        public ValueTask InjectTranslationFailureAsync(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            translationFailure = true;
+            return ValueTask.CompletedTask;
+        }
+
+        public Testing.ConformanceObservation Observe()
+        {
+            var rowQueries = commands.Sql.Where(sql => !owner.IsCountQuery(sql)).ToArray();
+            var queryEvidence =
+                rowQueries.Length != 0
+                && rowQueries.All(sql =>
+                {
+                    var start = sql.IndexOf("WHERE", StringComparison.OrdinalIgnoreCase);
+                    if (start < 0)
+                        return false;
+                    var predicate = sql[start..];
+                    return predicate.Contains("TenantId", StringComparison.Ordinal)
+                        && predicate.Contains("GroupId", StringComparison.Ordinal)
+                        && predicate.Contains("Denied", StringComparison.Ordinal);
+                });
+            string[] permitted = ["Id", "Name", "Rank", "LocalId", "GroupId"];
+            var columns = commands
+                .Columns.Where(names => names.Any(name => permitted.Contains(name)))
+                .ToArray();
+            return new(
+                sessions.Count,
+                sessions.Count(database => database.Disposed),
+                commands.Sql.Count(owner.IsCountQuery),
+                rowQueries.Length + translationAttempts,
+                DatabaseEvidenceAvailable: !omitEvidence
+                    && rowQueries.Length != 0
+                    && columns.Length != 0,
+                AuthorizationInQuery: queryEvidence,
+                RestrictedReaderColumns: commands.ColumnCheckPassed && columns.Length != 0,
+                MaterializedEntities: commands.Entities
+            );
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            protector = null;
+            return ValueTask.CompletedTask;
+        }
+
+        void Expect(
+            EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+            EntitySeekPlan<AdapterConformance.ConformanceEntity>? seek = null
+        ) =>
+            expectedColumns = plan
+                .OutputBindings.Select(binding => binding.Property.Name)
+                .Concat(seek?.ContinuationBindings.Select(property => property.Name) ?? [])
+                .ToHashSet(StringComparer.Ordinal);
+
+        sealed class TrackedSession(
+            ProviderConformanceFixture fixture,
+            IEntityReadSession<AdapterConformance.ConformanceEntity> session
+        )
+            : IEntityProjectedSeekReadSession<AdapterConformance.ConformanceEntity>,
+                IEntitySnapshotReadSession<AdapterConformance.ConformanceEntity>
+        {
+            public Task<long> CountAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                CancellationToken token
+            ) => session.CountAsync(plan, token);
+
+            public Task<IReadOnlyList<ProjectedReadRow>> PageProjectedAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                int offset,
+                int limit,
+                CancellationToken token
+            )
+            {
+                fixture.Expect(plan);
+                return (
+                    (IEntityProjectedReadSession<AdapterConformance.ConformanceEntity>)session
+                ).PageProjectedAsync(plan, offset, limit, token);
+            }
+
+            public Task<ProjectedReadRow?> SingleProjectedAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                CancellationToken token
+            )
+            {
+                fixture.Expect(plan);
+                return (
+                    (IEntityProjectedReadSession<AdapterConformance.ConformanceEntity>)session
+                ).SingleProjectedAsync(plan, token);
+            }
+
+            public Task<IReadOnlyList<ProjectedReadRow>> SeekProjectedAsync(
+                EntitySeekPlan<AdapterConformance.ConformanceEntity> plan,
+                int limit,
+                CancellationToken token
+            )
+            {
+                fixture.Expect(plan.Read, plan);
+                return (
+                    (IEntityProjectedSeekReadSession<AdapterConformance.ConformanceEntity>)session
+                ).SeekProjectedAsync(plan, limit, token);
+            }
+
+            public Task BeginSnapshotAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                CancellationToken token
+            ) =>
+                (
+                    (IEntitySnapshotReadSession<AdapterConformance.ConformanceEntity>)session
+                ).BeginSnapshotAsync(plan, token);
+
+            public Task<IReadOnlyList<AdapterConformance.ConformanceEntity>> PageAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                int offset,
+                int limit,
+                CancellationToken token
+            ) => session.PageAsync(plan, offset, limit, token);
+
+            public Task<AdapterConformance.ConformanceEntity?> SingleAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                CancellationToken token
+            ) => session.SingleAsync(plan, token);
+
+            public ValueTask DisposeAsync() => session.DisposeAsync();
+        }
+
+        sealed class TranslationFailureSession(
+            ProviderConformanceFixture fixture,
+            Database database
+        ) : IEntityProjectedReadSession<AdapterConformance.ConformanceEntity>
+        {
+            static bool Untranslatable(string value) => value.Length > 0;
+
+            public async Task<IReadOnlyList<ProjectedReadRow>> PageProjectedAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                int offset,
+                int limit,
+                CancellationToken token
+            )
+            {
+                fixture.translationAttempts++;
+                var rows = await database
+                    .Set<AdapterConformance.ConformanceEntity>()
+                    .Where(plan.Predicate)
+                    .Where(row => Untranslatable(row.Name))
+                    .Skip(offset)
+                    .Take(limit)
+                    .ToArrayAsync(token);
+                return rows.Select(row => new ProjectedReadRow(
+                        plan.OutputBindings.Select(binding => binding.Property.GetValue(row))
+                    ))
+                    .ToArray();
+            }
+
+            public Task<ProjectedReadRow?> SingleProjectedAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                CancellationToken token
+            ) =>
+                throw new NotSupportedException(
+                    "Fault injection supports row-page translation only."
+                );
+
+            public Task<long> CountAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                CancellationToken token
+            ) =>
+                throw new NotSupportedException(
+                    "Fault injection supports row-page translation only."
+                );
+
+            public Task<IReadOnlyList<AdapterConformance.ConformanceEntity>> PageAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                int offset,
+                int limit,
+                CancellationToken token
+            ) =>
+                throw new NotSupportedException(
+                    "Fault injection supports projected translation only."
+                );
+
+            public Task<AdapterConformance.ConformanceEntity?> SingleAsync(
+                EntityReadPlan<AdapterConformance.ConformanceEntity> plan,
+                CancellationToken token
+            ) =>
+                throw new NotSupportedException(
+                    "Fault injection supports row-page translation only."
+                );
+
+            public ValueTask DisposeAsync() => database.DisposeAsync();
+        }
+    }
+
+    static readonly ResourceSchema<CompositeRow> CompositeSchema = new(
+        "Composite",
+        "1",
+        [
+            ResourceSchema<CompositeRow>.Field("GroupId", row => row.GroupId, []),
+            ResourceSchema<CompositeRow>.Field("LocalId", row => row.LocalId, []),
+            ResourceSchema<CompositeRow>.Field(
+                "LocalAlias",
+                row => row.LocalId,
+                [FieldOperation.Sort]
+            ),
+            ResourceSchema<CompositeRow>.Field("TenantId", row => row.TenantId, []),
+            ResourceSchema<CompositeRow>.Field("Rank", row => row.Rank, [FieldOperation.Sort]),
+            ResourceSchema<CompositeRow>.Field("Label", row => row.Label, [FieldOperation.Select]),
+            ResourceSchema<CompositeRow>.Field("Denied", row => row.Denied, []),
+        ],
+        ["GroupId", "LocalId"]
+    );
+
+    async Task SeedComposite()
+    {
+        await using var db = new Database(Options);
+        db.AddRange(
+            new CompositeRow
+            {
+                GroupId = 1,
+                LocalId = 1,
+                TenantId = 1,
+                Rank = 0,
+                Label = "g1l1",
+            },
+            new CompositeRow
+            {
+                GroupId = 1,
+                LocalId = 2,
+                TenantId = 1,
+                Label = "g1l2",
+            },
+            new CompositeRow
+            {
+                GroupId = 2,
+                LocalId = 1,
+                TenantId = 1,
+                Rank = 0,
+                Label = "g2l1",
+            },
+            new CompositeRow
+            {
+                GroupId = 2,
+                LocalId = 2,
+                TenantId = 1,
+                Label = "g2l2",
+            },
+            new CompositeRow
+            {
+                GroupId = 3,
+                LocalId = 1,
+                TenantId = 2,
+                Label = "hidden",
+            },
+            new CompositeRow
+            {
+                GroupId = 4,
+                LocalId = 1,
+                TenantId = 1,
+                Label = "denied",
+                Denied = true,
+            }
+        );
+        await db.SaveChangesAsync();
+        var policy = new PolicyDefinition(
+            "Composite",
+            "1",
+            [
+                new("allow", "Composite", "Read", Effect.Allow, new([], []), null),
+                new(
+                    "deny",
+                    "Composite",
+                    "Read",
+                    Effect.Deny,
+                    new([], []),
+                    CompilerTests.Leaf("Denied", "eq", true)
+                ),
+            ],
+            [
+                new(
+                    "fields",
+                    "Composite",
+                    "Read",
+                    Effect.Allow,
+                    new([], []),
+                    new()
+                    {
+                        [FieldOperation.Select] = ["Label"],
+                        [FieldOperation.Sort] = ["Rank", "LocalAlias"],
+                    }
+                ),
+            ]
+        );
+        await Store.SaveDraftAsync(admin, "scope", "Composite", PolicyJson.Serialize(policy), 0);
+        await Store.PublishAsync(admin, "scope", CompositeSchema, CompilerTests.Registry, 1, 0);
+    }
+
+    AuthorizedReadRepository<CompositeRow> CompositeReads(
+        List<Database> sessions,
+        SeekCommands commands,
+        ExportReadConfiguration? export = null
+    )
+    {
+        var options = new DbContextOptionsBuilder<Database>(Options)
+            .AddInterceptors(commands, MaterializationCounter.Instance)
+            .Options;
+        Func<DbContext> factory = () =>
+        {
+            var db = new Database(options);
+            sessions.Add(db);
+            return db;
+        };
+        var operations = ReadOperations.All | ReadOperations.Snapshot;
+        IEntityReadAdapter<CompositeRow> adapter = ProviderName switch
+        {
+            "Microsoft.EntityFrameworkCore.Sqlite" => SqliteEntityReads.Create<CompositeRow>(
+                CompositeSchema,
+                factory,
+                operations
+            ),
+            "Microsoft.EntityFrameworkCore.SqlServer" =>
+                SqlServer.SqlServerEntityReads.Create<CompositeRow>(
+                    CompositeSchema,
+                    factory,
+                    operations
+                ),
+            "MySql.EntityFrameworkCore" => MySql.MySqlEntityReads.Create<CompositeRow>(
+                CompositeSchema,
+                factory,
+                operations
+            ),
+            _ => throw new NotSupportedException("Unknown composite provider."),
+        };
+        sessions.Clear();
+        return new(
+            CompositeSchema,
+            new(
+                CompositeSchema,
+                CompilerTests.Registry,
+                CompilerTests.Reference("TenantId", "tenant")
+            ),
+            Store,
+            adapter,
+            () => CompilerTests.Context(),
+            "scope",
+            new(2, 100, 1),
+            new(
+                new DataProtection.DataProtectionContinuationTokenProtector(
+                    new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider()
+                ),
+                () => "subject",
+                "composite-dataset"
+            ),
+            export: export
+        );
+    }
+
+    [Fact]
+    public async Task Composite_provider_detail_list_cursor_and_export_use_the_full_hidden_tuple()
+    {
+        await SeedComposite();
+        var sessions = new List<Database>();
+        var commands = new SeekCommands();
+        var reads = CompositeReads(sessions, commands);
+        SortField[] sort = [new("Rank"), new("LocalAlias", true), new("LocalAlias", true)];
+        string[] expected = ["g1l2", "g2l2", "g1l1", "g2l1"];
+        var offset = new List<string?>();
+        for (var start = 0; start < 4; start += 2)
+        {
+            var page = await reads.ListAsync(new(Sort: sort, Offset: start, Limit: 2));
+            Assert.Equal(4, page.Total);
+            offset.AddRange(page.Records.Select(row => row.GetProperty("Label").GetString()));
+        }
+        Assert.Equal(expected, offset);
+        var cursor = new List<string?>();
+        string? token = null;
+        do
+        {
+            var page = await reads.ListCursorAsync(
+                new(
+                    Sort: sort,
+                    Limit: 1,
+                    ContinuationToken: token,
+                    IncludeTotal: false,
+                    IncludeHasMore: true
+                )
+            );
+            Assert.Null(page.Total);
+            cursor.AddRange(page.Records.Select(row => row.GetProperty("Label").GetString()));
+            Assert.All(page.Records, row => Assert.Single(row.EnumerateObject()));
+            token = page.NextContinuationToken;
+            Assert.Equal(token != null, page.HasMore);
+        } while (token != null);
+        Assert.Equal(expected, cursor);
+        var exported = new List<string?>();
+        await foreach (var batch in reads.ExportAsync(new(Sort: sort)))
+            exported.AddRange(batch.Records.Select(row => row.GetProperty("Label").GetString()));
+        Assert.Equal(expected, exported);
+        Assert.Equal(
+            "g2l1",
+            (
+                await reads.DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { GroupId = 2, LocalId = 1 }))
+                )
+            )
+                .Record!.Value.GetProperty("Label")
+                .GetString()
+        );
+        Assert.Null(
+            (
+                await reads.DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { GroupId = 3, LocalId = 1 }))
+                )
+            ).Record
+        );
+        Assert.Null(
+            (
+                await reads.DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { GroupId = 99, LocalId = 1 }))
+                )
+            ).Record
+        );
+        Assert.Equal(0, commands.Entities);
+        Assert.All(
+            commands.Columns,
+            columns =>
+            {
+                Assert.DoesNotContain("Secret", columns);
+                Assert.DoesNotContain("TenantId", columns);
+                Assert.DoesNotContain("Denied", columns);
+            }
+        );
+        Assert.Contains(
+            commands.Columns,
+            columns => columns.Contains("GroupId") && columns.Contains("LocalId")
+        );
+        Assert.All(sessions, db => Assert.True(db.Disposed));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Composite_export_modes_caps_deadlines_and_policy_abort(
+        bool snapshot,
+        bool abort
+    )
+    {
+        await SeedComposite();
+        await PrepareSnapshot();
+        var sessions = new List<Database>();
+        var commands = new SeekCommands();
+        var clock = new ExportLifecycleTests.Clock();
+        var configuration = new ExportReadConfiguration(
+            abort
+                ? ExportPolicyConsistency.AbortOnPolicyChange
+                : ExportPolicyConsistency.CapturedPolicy,
+            snapshot ? ExportDataConsistency.Snapshot : ExportDataConsistency.BestEffort,
+            maxRows: 3,
+            maxDuration: TimeSpan.FromSeconds(5),
+            timeProvider: clock
+        );
+        var reads = CompositeReads(sessions, commands, configuration);
+        SortField[] sort = [new("Rank"), new("LocalAlias", true)];
+        await using (var iterator = reads.ExportAsync(new(Sort: sort)).GetAsyncEnumerator())
+        {
+            Assert.True(await iterator.MoveNextAsync());
+            Assert.Equal(
+                "g1l2",
+                Assert.Single(iterator.Current.Records).GetProperty("Label").GetString()
+            );
+            await using (var mutation = new Database(Options))
+            {
+                var row = await mutation
+                    .Set<CompositeRow>()
+                    .SingleAsync(row => row.GroupId == 2 && row.LocalId == 2);
+                row.Label = "changed";
+                await mutation.SaveChangesAsync();
+            }
+            Assert.True(await iterator.MoveNextAsync());
+            Assert.Equal(
+                snapshot ? "g2l2" : "changed",
+                Assert.Single(iterator.Current.Records).GetProperty("Label").GetString()
+            );
+            Assert.True(await iterator.MoveNextAsync());
+            Assert.Equal(
+                "g1l1",
+                Assert.Single(iterator.Current.Records).GetProperty("Label").GetString()
+            );
+            Assert.False(await iterator.MoveNextAsync());
+        }
+        Assert.Equal(3, commands.Sql.Count);
+        Assert.Equal(0, commands.Entities);
+        Assert.All(sessions, db => Assert.True(db.Disposed));
+        await using (var iterator = reads.ExportAsync(new(Sort: sort)).GetAsyncEnumerator())
+        {
+            Assert.True(await iterator.MoveNextAsync());
+            clock.Advance(TimeSpan.FromSeconds(5));
+            await Assert.ThrowsAsync<ExportDurationExceededException>(() =>
+                iterator.MoveNextAsync().AsTask()
+            );
+        }
+        await using (var iterator = reads.ExportAsync(new(Sort: sort)).GetAsyncEnumerator())
+        {
+            Assert.True(await iterator.MoveNextAsync());
+            await Store.PublishAsync(admin, "scope", CompositeSchema, CompilerTests.Registry, 1, 1);
+            if (abort)
+                await Assert.ThrowsAsync<ExportPolicyChangedException>(() =>
+                    iterator.MoveNextAsync().AsTask()
+                );
+            else
+                Assert.True(await iterator.MoveNextAsync());
+        }
+        Assert.All(sessions, db => Assert.True(db.Disposed));
+        Assert.Equal(0, clock.Timers);
     }
 
     public class Boundary
@@ -256,9 +959,17 @@ public class ReadTests : IAsyncLifetime
         var next = await reads.ListAsync(new(Sort: [new("Name")], Offset: 2, Limit: 2));
         Assert.Equal(3, next.Records.Single().GetProperty("Id").GetInt32());
         Assert.Equal(3, (await reads.CountAsync(new())).Total);
-        Assert.Null((await reads.DetailAsync(new(JsonSerializer.SerializeToElement(4)))).Record);
-        Assert.Null((await reads.DetailAsync(new(JsonSerializer.SerializeToElement(99)))).Record);
-        Assert.NotNull((await reads.DetailAsync(new(JsonSerializer.SerializeToElement(1)))).Record);
+        Assert.Null(
+            (await reads.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 4 })))).Record
+        );
+        Assert.Null(
+            (
+                await reads.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 99 })))
+            ).Record
+        );
+        Assert.NotNull(
+            (await reads.DetailAsync(new(JsonSerializer.SerializeToElement(new { Id = 1 })))).Record
+        );
         var empty = await reads.ListAsync(new(Selection: [], Limit: 2));
         Assert.All(empty.Records, r => Assert.Equal("{}", r.GetRawText()));
     }
@@ -317,7 +1028,7 @@ public class ReadTests : IAsyncLifetime
                     [FieldOperation.Select]
                 ),
             ],
-            "key"
+            ["key"]
         );
         var policy = new PolicyDefinition(
             "Projection",
@@ -409,18 +1120,22 @@ public class ReadTests : IAsyncLifetime
             Assert.Equal(
                 "{}",
                 (
-                    await repo.DetailAsync(new(JsonSerializer.SerializeToElement(1), Selection: []))
+                    await repo.DetailAsync(
+                        new(JsonSerializer.SerializeToElement(new { key = 1 }), Selection: [])
+                    )
                 ).Record!.Value.GetRawText()
             );
             Assert.Null(
                 (
-                    await repo.DetailAsync(new(JsonSerializer.SerializeToElement(3), Selection: []))
+                    await repo.DetailAsync(
+                        new(JsonSerializer.SerializeToElement(new { key = 3 }), Selection: [])
+                    )
                 ).Record
             );
             Assert.Null(
                 (
                     await repo.DetailAsync(
-                        new(JsonSerializer.SerializeToElement(99), Selection: [])
+                        new(JsonSerializer.SerializeToElement(new { key = 99 }), Selection: [])
                     )
                 ).Record
             );
@@ -680,7 +1395,7 @@ public class ReadTests : IAsyncLifetime
             );
             Assert.Equal("/key", Assert.Single(error.Diagnostics).Path);
         }
-        var key = JsonSerializer.SerializeToElement(1);
+        var key = JsonSerializer.SerializeToElement(new { Id = 1 });
         var present = await reads.DetailAsync(
             new(
                 key,
@@ -773,7 +1488,9 @@ public class ReadTests : IAsyncLifetime
         await Assert.ThrowsAsync<AuthorizationException>(() =>
             reads.ListAsync(new(Selection: ["Id"], Limit: 1))
         );
-        var detail = await reads.DetailAsync(new(JsonSerializer.SerializeToElement(1)));
+        var detail = await reads.DetailAsync(
+            new(JsonSerializer.SerializeToElement(new { Id = 1 }))
+        );
         Assert.Equal(page.PolicyVersion, detail.PolicyVersion);
         Assert.Equal("{\"Name\":\"Same\"}", detail.Record!.Value.GetRawText());
         var batches = 0;
@@ -847,7 +1564,7 @@ public class ReadTests : IAsyncLifetime
                 ),
                 ResourceSchema<Boundary>.Field("Computed", e => e.Computed, []),
             ],
-            "Id"
+            ["Id"]
         );
         var policy = new PolicyDefinition(
             "Boundary",
@@ -1004,7 +1721,7 @@ public class ReadTests : IAsyncLifetime
                     [FieldOperation.Filter, FieldOperation.Sort]
                 ),
             ],
-            "key"
+            ["key"]
         );
         var definition = new PolicyDefinition(
             "Boundary",
@@ -1484,6 +2201,8 @@ public class ReadTests : IAsyncLifetime
         public List<object?[]> Parameters { get; } = [];
         public List<string[]> Columns { get; } = [];
         public int Entities;
+        public Func<string, string[], bool>? ColumnCheck;
+        public bool ColumnCheckPassed = true;
         public Func<Task>? AfterRead;
 
         public override async ValueTask<System.Data.Common.DbDataReader> ReaderExecutedAsync(
@@ -1493,7 +2212,10 @@ public class ReadTests : IAsyncLifetime
             CancellationToken cancellationToken = default
         )
         {
-            Columns.Add(Enumerable.Range(0, result.FieldCount).Select(result.GetName).ToArray());
+            var columns = Enumerable.Range(0, result.FieldCount).Select(result.GetName).ToArray();
+            Columns.Add(columns);
+            if (ColumnCheck != null)
+                ColumnCheckPassed &= ColumnCheck(command.CommandText, columns);
             if (AfterRead != null)
                 await AfterRead();
             return result;

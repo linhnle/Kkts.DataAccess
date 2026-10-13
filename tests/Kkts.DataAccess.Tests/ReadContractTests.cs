@@ -44,7 +44,7 @@ public class ReadContractTests
             """{"filter":{"field":"Status","operator":"eq","literal":"Active"}}"""
         );
         AssertRoundTrip<DetailReadRequest>(
-            """{"key":1,"selection":[],"filter":{"field":"Status","operator":"eq","literal":"Active"}}"""
+            """{"key":{"Id":1},"selection":[],"filter":{"field":"Status","operator":"eq","literal":"Active"}}"""
         );
         AssertRoundTrip<ExportReadRequest>(
             """{"selection":["Name"],"filter":{"field":"Status","operator":"eq","literal":"Active"},"sort":[{"field":"Name"}]}"""

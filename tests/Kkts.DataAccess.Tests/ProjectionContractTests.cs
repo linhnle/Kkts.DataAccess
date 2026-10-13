@@ -109,7 +109,7 @@ public class ProjectionContractTests
                 ResourceSchema<Row>.Field("id", row => row.Id, [FieldOperation.Select]),
                 ResourceSchema<Row>.Field("name", row => row.Name, [FieldOperation.Select]),
             ],
-            "id"
+            ["id"]
         );
         Row.Constructors = Row.Getters = 0;
         var builds = DtoMapper.Cache.BuildCount;

@@ -136,15 +136,30 @@ Each offset list, cursor list, detail, count, and export operation SHALL capture
 - **WHEN** publication occurs after a count operation captures its policy and before its query completes
 - **THEN** the exact count and returned policy version both correspond to that operation's captured authorization
 
+### Requirement: Exact object-shaped detail keys
+All detail requests SHALL provide an object containing exactly one value for each registered key alias, including single-component resources. Scalar keys, missing/extra/duplicate/case-mismatched members, nulls, and incompatible values SHALL fail before entity access with component diagnostics. Detail lookup SHALL combine equality for every key component with authorization and any client filter. Implicit key equality SHALL NOT require client Filter grants; explicit filters still SHALL. Inaccessible and nonexistent tuple identities SHALL retain identical not-found behavior.
+
+#### Scenario: Complete tuple detail
+- **WHEN** the caller supplies `{"TenantId":1,"LocalId":7}` for that resource key
+- **THEN** detail retrieves at most the authorized row matching both values
+
+#### Scenario: Single key migration
+- **WHEN** a single-key resource receives a scalar rather than `{"Id":7}`
+- **THEN** input is rejected and the caller must use the one-member object contract
+
+#### Scenario: Duplicate or incomplete components
+- **WHEN** the key repeats LocalId or omits TenantId
+- **THEN** validation reports the invalid component/object and opens no entity session
+
 ### Requirement: Bounded deterministic pagination
-The system SHALL enforce configured page and export batch limits and deterministic ordering before applying pagination. A host-declared unique tie-breaker SHALL complete ordering when necessary; it MUST NOT be output or made available to client filtering or sorting without the corresponding grants. A resource without a usable deterministic ordering SHALL reject paginated reads. Cursor pages and export batches SHALL use lexicographic seek boundaries over the complete effective ordering, preserving each direction and using null placement and equality/comparison semantics consistent with the provider's ordering. Internal seek comparisons SHALL NOT require or grant additional client Filter permissions. For unchanged matching rows and sort tuples, traversal SHALL produce no gaps or duplicates across equal sort values.
+The system SHALL enforce configured page and export batch limits and deterministic ordering before applying pagination. A host-declared ordered unique key tuple SHALL complete ordering by appending each missing key property in declared order ascending while preserving explicit sort order, directions, and repeated sort semantics; it MUST NOT be output or made available to client filtering or sorting without the corresponding grants. Aliases bound to the same property SHALL NOT cause duplicate implicit completion. A resource without usable deterministic ordering SHALL reject paginated reads. Cursor pages and export batches SHALL use lexicographic seek boundaries over the complete effective ordering, preserving each direction and using null placement and equality/comparison semantics consistent with provider ordering. Internal seek comparisons SHALL NOT require or grant additional client Filter permissions. For unchanged matching rows and sort tuples, traversal SHALL produce no gaps or duplicates across equal sort values. Cursor compatibility SHALL bind the complete ordered key identity; hidden key values SHALL remain separate encrypted continuation metadata.
 
 #### Scenario: Equal sort values
 - **WHEN** several authorized records share a client sort value
-- **THEN** the host-declared tie-breaker produces deterministic page ordering
+- **THEN** the host-declared full key tuple produces deterministic page ordering
 
 #### Scenario: Mixed directions and nulls
-- **WHEN** supported ordering combines ascending and descending fields, nullable values, and the unique tie-breaker
+- **WHEN** supported ordering combines ascending and descending fields, nullable values, and the unique key tuple
 - **THEN** resumed pages and export batches traverse the same effective ordered sequence without dropping equal-prefix rows
 
 #### Scenario: Sort does not grant filtering
@@ -153,7 +168,11 @@ The system SHALL enforce configured page and export batch limits and determinist
 
 #### Scenario: Provider-equivalent text values
 - **WHEN** the provider treats distinct text values as equal under its configured collation
-- **THEN** seek equality uses that same collation and the unique tie-breaker distinguishes rows across boundaries
+- **THEN** seek equality uses that same collation and the unique key tuple distinguishes rows across boundaries
+
+#### Scenario: Partially explicit key sorting
+- **WHEN** a client sorts LocalId descending for a key ordered TenantId then LocalId
+- **THEN** that explicit direction remains and missing TenantId is appended ascending to complete unique ordering
 
 ### Requirement: Operation-specific read inputs
 The system SHALL expose distinct list, count, detail, and export request contracts. List SHALL accept selection, a structured filter, sorting, offset, and limit, with defaults of offset zero and limit fifty. Count SHALL accept only a structured filter. Detail SHALL require a key and accept selection and an optional structured filter. Export SHALL accept selection, a structured filter, and sorting, with batching, consistency, and lifecycle limits controlled exclusively by host configuration. Read requests MUST NOT contain an action or authorization identity override. Every operation SHALL bind internally to the Read policy action.

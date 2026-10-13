@@ -571,7 +571,7 @@ public class DependencyInjectionTests : IAsyncLifetime
                                     [FieldOperation.Select]
                                 ),
                             ],
-                            "Id"
+                            ["Id"]
                         )
                     )
                     .WithCompiler(

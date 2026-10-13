@@ -318,7 +318,7 @@ public class PolicyStoreTests : IDisposable
             "Employee",
             "2",
             CompilerTests.Schema.Fields.Values,
-            "Id"
+            ["Id"]
         );
         await Assert.ThrowsAsync<SchemaIncompatibleException>(() =>
             store.RollbackAsync(admin, "scope", incompatible, CompilerTests.Registry, version, 1)

@@ -8,6 +8,8 @@ public class SchemaTests
     public class Employee
     {
         public int Id { get; set; }
+        public int TenantId { get; set; }
+        public bool Flag { get; set; }
         public string Name { get; set; } = "";
         public decimal? Salary { get; set; }
         public Employee? Manager { get; set; }
@@ -20,7 +22,7 @@ public class SchemaTests
     public void Invalid_bindings_and_duplicate_names_are_rejected()
     {
         Assert.Throws<ArgumentException>(() =>
-            new ResourceSchema<Employee>("Employee", "1", [Id(), Id()], "Id")
+            new ResourceSchema<Employee>("Employee", "1", [Id(), Id()], ["Id"])
         );
         Assert.Throws<ArgumentException>(() =>
             ResourceSchema<Employee>.Field("Manager", e => e.Manager, [FieldOperation.Select])
@@ -39,7 +41,7 @@ public class SchemaTests
     [Fact]
     public void Metadata_requires_administration_in_the_host_scope()
     {
-        var schema = new ResourceSchema<Employee>("Employee", "1", [Id()], "Id");
+        var schema = new ResourceSchema<Employee>("Employee", "1", [Id()], ["Id"]);
         Assert.Throws<AuthorizationException>(() =>
             schema.Metadata(new("actor", "tenant", false), "tenant")
         );
@@ -49,7 +51,59 @@ public class SchemaTests
         var metadata = schema.Metadata(new("actor", "tenant", true), "tenant");
         Assert.Single(metadata.Fields);
         Assert.Equal("Id", metadata.Fields[0].Name);
+        Assert.Equal(["Id"], metadata.KeyFields);
         Assert.Throws<InvalidRequestException>(() => schema.Resolve("Manager.Id"));
+    }
+
+    [Theory]
+    [InlineData("", "/keyFields")]
+    [InlineData("Id,Id", "/keyFields/1")]
+    [InlineData("Id,Alias", "/keyFields/1")]
+    [InlineData("Id,Salary", "/keyFields/1")]
+    [InlineData("Id,Flag", "/keyFields/1")]
+    [InlineData("Id,unknown", "/keyFields/1")]
+    [InlineData("id", "/keyFields/0")]
+    public void Invalid_key_tuples_have_component_diagnostics(string keys, string path)
+    {
+        var failure = Assert.Throws<InvalidRequestException>(() =>
+            new ResourceSchema<Employee>(
+                "Employee",
+                "1",
+                [
+                    Id(),
+                    ResourceSchema<Employee>.Field("Alias", row => row.Id, []),
+                    ResourceSchema<Employee>.Field("Salary", row => row.Salary, []),
+                    ResourceSchema<Employee>.Field("Flag", row => row.Flag, []),
+                ],
+                keys.Length == 0 ? [] : keys.Split(',')
+            )
+        );
+        Assert.Equal(path, Assert.Single(failure.Diagnostics).Path);
+    }
+
+    [Fact]
+    public void Key_tuple_is_snapshotted_and_metadata_requires_administration()
+    {
+        var keys = new[] { "TenantId", "Id" };
+        var schema = new ResourceSchema<Employee>(
+            "Employee",
+            "1",
+            [Id(), ResourceSchema<Employee>.Field("TenantId", row => row.TenantId, [])],
+            keys
+        );
+        keys[0] = "Id";
+        Assert.Equal(["TenantId", "Id"], schema.KeyFields.Select(field => field.Name));
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<ResourceField>)schema.KeyFields)[0] = Id()
+        );
+        Assert.Throws<AuthorizationException>(() =>
+            schema.Metadata(new("actor", "tenant", false), "tenant")
+        );
+        Assert.Equal(
+            ["TenantId", "Id"],
+            schema.Metadata(new("actor", "tenant", true), "tenant").KeyFields
+        );
+        Assert.Empty(schema.Resolve("TenantId").Eligibility);
     }
 
     [Theory]

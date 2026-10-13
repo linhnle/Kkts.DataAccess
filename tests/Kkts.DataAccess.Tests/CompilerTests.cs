@@ -38,7 +38,7 @@ public class CompilerTests
             ),
             ResourceSchema<Employee>.Field("Salary", e => e.Salary, [FieldOperation.Select]),
         ],
-        "Id"
+        ["Id"]
     );
     public static readonly ContextRegistry Registry = new(
         new Dictionary<string, Type> { { "tenant", typeof(int) }, { "department", typeof(int) } }

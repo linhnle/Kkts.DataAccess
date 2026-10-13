@@ -40,7 +40,7 @@ public class DtoMapperTests
                     ? ResourceSchema<Row>.Field(alias, r => r.Other, [FieldOperation.Select])
                     : ResourceSchema<Row>.Field(alias, r => r.Name, [FieldOperation.Select]),
             ],
-            "id"
+            ["id"]
         );
 
     internal static IReadOnlyList<JsonElement> MapUncached<T>(
@@ -170,7 +170,7 @@ public class DtoMapperTests
                     [FieldOperation.Select]
                 ),
             ],
-            "id"
+            ["id"]
         );
         ScalarRow<TValue>[] rows = [new() { Id = 1, Value = value }];
         Assert.Equal(

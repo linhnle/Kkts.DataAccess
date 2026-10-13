@@ -1,5 +1,21 @@
 # Authorized read repositories
 
+## Test-only adapter conformance
+
+Extension authors can reference `Kkts.DataAccess.Testing` from their **test
+project only**. Its runner-neutral async suite constructs protected repositories
+using generic direct-property fixture bindings; it requires no internal plan
+constructor, xUnit, EF, driver, DI registration or production-host dependency.
+See the [fixture/coverage/evidence guide](../src/Kkts.DataAccess.Testing/README.md)
+and the non-xUnit [CustomReadAdapter consumer](../examples/AdapterConformance).
+
+Fixtures own exact resource handles and register them immediately during setup.
+Keep existing provider-specific tests: passing the portable cases is not adapter
+certification. Mandatory failures and missing real-provider evidence prevent
+an overall pass; absent optional modes run rejection checks and remain
+`Unsupported`, rather than successful snapshot/seek evidence. The recording
+consumer intentionally reports database enforcement as `NotRun`.
+
 `IAuthorizedReadRepository<T>` is the client-facing read-only contract. `AuthorizedReadRepository<T>` in core owns policy capture, validation, predicate composition and permitted DTO mapping. Core references neither EF Core nor a database driver. Policy storage remains `SqlitePolicyStore`, which implements `IActivePolicySource`.
 
 Trusted host code supplies an `IEntityReadAdapter<T>`. Its async sessions receive immutable `EntityReadPlan<T>` values built by the repository; plans include the complete authorized predicate, resolved sort properties including the stable key, and ordered authorized `OutputBindings`. Filter/sort-only dependencies are not output bindings. Execute the complete predicate in the provider before counting or paging. Never replace it, return a query handle to clients, or evaluate authorization locally after fetching unrestricted records. Only permitted JSON DTOs leave the facade.
