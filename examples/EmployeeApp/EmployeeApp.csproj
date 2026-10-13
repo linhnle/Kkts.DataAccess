@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+    <ItemGroup>
+        <ProjectReference Include="../../src/Kkts.DataAccess.DependencyInjection/Kkts.DataAccess.DependencyInjection.csproj" />
+        <ProjectReference Include="../../src/Kkts.DataAccess.AspNetCore/Kkts.DataAccess.AspNetCore.csproj" />
+        <ProjectReference Include="../../src/Kkts.DataAccess.DataProtection/Kkts.DataAccess.DataProtection.csproj" />
+        <ProjectReference Include="../../src/Kkts.DataAccess.SqlServer/Kkts.DataAccess.SqlServer.csproj" />
+        <ProjectReference Include="../../src/Kkts.DataAccess.MySql/Kkts.DataAccess.MySql.csproj" />
+        <ProjectReference Include="../../src/Kkts.DataAccess.Sqlite/Kkts.DataAccess.Sqlite.csproj" />
+    </ItemGroup>
+    <ItemGroup Condition="'$(UsePackedCore)' == 'true'">
+        <PackageReference Include="Kkts.DataAccess" Version="0.1.0" />
+    </ItemGroup>
+</Project>

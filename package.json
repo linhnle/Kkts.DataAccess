@@ -1,0 +1,13 @@
+{
+  "name": "kkts-dataaccess-formatting",
+  "private": true,
+  "scripts": {
+    "prepare": "husky",
+    "format": "prettier --write \"**/*.{js,mjs,cjs,jsx}\"",
+    "format:check": "dotnet csharpier check . && prettier --check \"**/*.{js,mjs,cjs,jsx}\""
+  },
+  "devDependencies": {
+    "husky": "9.1.7",
+    "prettier": "3.9.10"
+  }
+}

@@ -1,0 +1,13 @@
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_SA_PASSWORD: Kda-local-Fixture-Only42
+    ports: ["127.0.0.1:51433:1433"]
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: kda-local-fixture-only
+    ports: ["127.0.0.1:53306:3306"]

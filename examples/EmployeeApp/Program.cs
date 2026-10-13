@@ -1,0 +1,504 @@
+using System.Security.Claims;
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using EmployeeApp;
+using Kkts.DataAccess;
+using Kkts.DataAccess.AspNetCore;
+using Kkts.DataAccess.DataProtection;
+using Kkts.DataAccess.DependencyInjection;
+using Kkts.DataAccess.Sqlite;
+using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+
+var builder = WebApplication.CreateBuilder(args);
+builder
+    .Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(o =>
+    {
+        o.LoginPath = "/login";
+        o.Events.OnRedirectToLogin = c =>
+        {
+            c.Response.StatusCode = 401;
+            return Task.CompletedTask;
+        };
+        o.Events.OnRedirectToAccessDenied = c =>
+        {
+            c.Response.StatusCode = 403;
+            return Task.CompletedTask;
+        };
+    });
+builder.Services.AddAuthorization();
+builder.Services.AddAntiforgery();
+builder.Services.AddDataAccessProblemDetails();
+builder.Services.AddHttpContextAccessor();
+builder.Host.UseDefaultServiceProvider(options =>
+{
+    options.ValidateScopes = true;
+    options.ValidateOnBuild = true;
+});
+var cursorKeys =
+    builder.Configuration["CursorKeys"]
+    ?? Path.Combine(builder.Environment.ContentRootPath, ".cursor-keys");
+builder
+    .Services.AddDataProtection()
+    .SetApplicationName(builder.Configuration["CursorApplication"] ?? "Kkts.EmployeeApp")
+    .PersistKeysToFileSystem(new DirectoryInfo(cursorKeys));
+var connection = builder.Configuration["Database"] ?? "Data Source=employee.db";
+var provider = builder.Configuration["EntityProvider"] ?? "Sqlite";
+if (provider is not ("Sqlite" or "SqlServer" or "MySql"))
+    throw new InvalidOperationException("Unknown EntityProvider. Use Sqlite, SqlServer or MySql.");
+var entityConnection =
+    builder.Configuration["EntityDatabase"]
+    ?? (
+        provider == "Sqlite"
+            ? connection
+            : throw new InvalidOperationException(
+                "EntityDatabase is required for the selected provider."
+            )
+    );
+var policyConnection = builder.Configuration["PolicyDatabase"] ?? connection;
+var optionsBuilder = new DbContextOptionsBuilder<EmployeeDatabase>();
+switch (provider)
+{
+    case "Sqlite":
+        optionsBuilder.UseSqlite(entityConnection);
+        break;
+    case "SqlServer":
+        optionsBuilder.UseSqlServer(entityConnection);
+        break;
+    case "MySql":
+        optionsBuilder.UseMySQL(entityConnection);
+        break;
+    default:
+        throw new InvalidOperationException(
+            "Unknown EntityProvider. Use Sqlite, SqlServer or MySql."
+        );
+}
+var options = optionsBuilder.Options;
+builder.Services.AddSingleton<IDbContextFactory<EmployeeDatabase>>(
+    new PooledDbContextFactory<EmployeeDatabase>(options)
+);
+builder.Services.AddSingleton<IContinuationTokenProtector>(
+    services => new DataProtectionContinuationTokenProtector(
+        services.GetRequiredService<IDataProtectionProvider>()
+    )
+);
+var exportConfiguration = new ExportReadConfiguration(
+    builder.Configuration.GetValue<ExportPolicyConsistency>("Export:PolicyConsistency"),
+    builder.Configuration.GetValue<ExportDataConsistency>("Export:DataConsistency"),
+    builder.Configuration.GetValue<long?>("Export:MaxRows"),
+    builder.Configuration.GetValue<TimeSpan?>("Export:MaxDuration")
+);
+var store = new SqlitePolicyStore(policyConnection);
+var operations =
+    ReadOperations.All
+    | (
+        exportConfiguration.DataConsistency == ExportDataConsistency.Snapshot
+            ? ReadOperations.Snapshot
+            : ReadOperations.None
+    );
+builder.Services.AddAuthorizedReads<Employee>(
+    "employees",
+    resource =>
+        resource
+            .WithSchema(EmployeeConfiguration.Schema)
+            .WithCompiler(EmployeeConfiguration.Registry, EmployeeConfiguration.Mandatory)
+            .WithPolicySource(store)
+            .WithAdapter(services =>
+            {
+                var factory = services.GetRequiredService<IDbContextFactory<EmployeeDatabase>>();
+                return provider switch
+                {
+                    "Sqlite" => SqliteEntityReads.Create<Employee, EmployeeDatabase>(
+                        EmployeeConfiguration.Schema,
+                        factory,
+                        operations
+                    ),
+                    "SqlServer" => Kkts.DataAccess.SqlServer.SqlServerEntityReads.Create<
+                        Employee,
+                        EmployeeDatabase
+                    >(EmployeeConfiguration.Schema, factory, operations),
+                    "MySql" => Kkts.DataAccess.MySql.MySqlEntityReads.Create<
+                        Employee,
+                        EmployeeDatabase
+                    >(EmployeeConfiguration.Schema, factory, operations),
+                    _ => throw new InvalidOperationException("Unknown EntityProvider."),
+                };
+            })
+            .WithTrustedContext<EmployeeTrustedContextProvider>()
+            .WithScope(trusted => "tenant-" + trusted.Values["tenant"])
+            .WithCursorProtection(services =>
+                services.GetRequiredService<IContinuationTokenProtector>()
+            )
+            .WithCursorSubject(trusted =>
+                trusted.Values["subject"] as string
+                ?? throw new AuthorizationException("An authenticated subject is required.")
+            )
+            .WithOptions(
+                new ResourceReadOptions
+                {
+                    ProjectionMode = ReadProjectionMode.Required,
+                    Export = exportConfiguration,
+                    Cursor = new(
+                        builder.Configuration["CursorDataset"]
+                            ?? $"synthetic-employee-{provider}-v1"
+                    ),
+                }
+            )
+);
+var app = builder.Build();
+app.UseDataAccessProblemDetails();
+app.UseStaticFiles();
+app.UseAuthentication();
+app.UseAuthorization();
+await using (var db = new EmployeeDatabase(options))
+{
+    await db.Database.EnsureCreatedAsync();
+    if (!await db.Employees.AnyAsync())
+    {
+        db.AddRange(EmployeeConfiguration.Fixtures(1).Concat(EmployeeConfiguration.Fixtures(2)));
+        await db.SaveChangesAsync();
+    }
+}
+await store.InitializeAsync();
+foreach (var tenant in new[] { 1, 2 })
+{
+    var admin = new AdministrationContext("seed", "tenant-" + tenant, true);
+    if ((await store.ReadDraftAsync(admin, admin.Scope, "Employee")).DraftRevision == 0)
+        await store.SaveDraftAsync(
+            admin,
+            admin.Scope,
+            "Employee",
+            PolicyJson.Serialize(EmployeeConfiguration.InitialPolicy()),
+            0
+        );
+}
+
+IAuthorizedReadRepository<Employee> Reads(HttpContext http) =>
+    http.RequestServices.GetRequiredKeyedService<IAuthorizedReadRepository<Employee>>("employees");
+string Token(HttpContext http) =>
+    HtmlEncoder.Default.Encode(
+        http
+            .RequestServices.GetRequiredService<IAntiforgery>()
+            .GetAndStoreTokens(http)
+            .RequestToken!
+    );
+IReadOnlyList<IReadProviderCapabilities> Profiles(HttpContext http) =>
+    http
+        .RequestServices.GetRequiredKeyedService<PolicyCompiler<Employee>>("employees")
+        .Capabilities;
+Task Protect(HttpContext http) =>
+    http.RequestServices.GetRequiredService<IAntiforgery>().ValidateRequestAsync(http);
+long Revision(IFormCollection form, string name) =>
+    long.TryParse(form[name], out var value) && value >= 0
+        ? value
+        : throw new BadHttpRequestException("Invalid revision.");
+app.MapGet("/", () => Results.Redirect("/admin"));
+app.MapGet(
+    "/login",
+    (HttpContext http) =>
+    {
+        if (!app.Environment.IsDevelopment())
+            return Results.NotFound();
+        return Results.Content(
+            "<h1>Synthetic demo identity</h1><p>Local development fixtures only.</p><form method='post'><input type='hidden' name='__RequestVerificationToken' value='"
+                + Token(http)
+                + "'><select name='profile'>"
+                + string.Join(
+                    "",
+                    from tenant in new[] { 1, 2 }
+                    from role in new[] { "admin", "manager", "hr", "employee", "none" }
+                    select $"<option value='{tenant}:{role}'>Tenant {tenant} {role}</option>"
+                )
+                + "</select><button>Sign in</button></form>",
+            "text/html"
+        );
+    }
+);
+app.MapPost(
+    "/login",
+    async (HttpContext http) =>
+    {
+        if (!app.Environment.IsDevelopment())
+            return Results.NotFound();
+        await Protect(http);
+        var form = await http.Request.ReadFormAsync();
+        var parts = form["profile"].ToString().Split(':');
+        if (
+            parts.Length != 2
+            || !new[] { "1", "2" }.Contains(parts[0])
+            || !new[] { "admin", "manager", "hr", "employee", "none" }.Contains(parts[1])
+        )
+            return Results.BadRequest();
+        var tenant = int.Parse(parts[0]);
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.Name, $"demo-{tenant}-{parts[1]}"),
+            new Claim(ClaimTypes.NameIdentifier, (tenant * 100 + 1).ToString()),
+            new Claim("tenant", parts[0]),
+            new Claim("department", "10"),
+            new Claim(ClaimTypes.Role, parts[1]),
+        };
+        await http.SignInAsync(
+            CookieAuthenticationDefaults.AuthenticationScheme,
+            new ClaimsPrincipal(
+                new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)
+            )
+        );
+        return Results.Redirect(parts[1] == "admin" ? "/admin" : "/employees");
+    }
+);
+app.MapGet(
+        "/employees",
+        (Func<HttpContext, Task<IResult>>)(
+            async (HttpContext http) =>
+                Results.Json(await Reads(http).ListAsync(new(), http.RequestAborted))
+        )
+    )
+    .RequireAuthorization();
+app.MapPost(
+        "/employees/list",
+        async (HttpContext http, ListReadRequest request) =>
+        {
+            await Protect(http);
+            return await Reads(http).ListAsync(request, http.RequestAborted);
+        }
+    )
+    .RequireAuthorization();
+app.MapPost(
+        "/employees/cursor",
+        async (HttpContext http, CursorListReadRequest request) =>
+        {
+            await Protect(http);
+            return await Reads(http).ListCursorAsync(request, http.RequestAborted);
+        }
+    )
+    .RequireAuthorization();
+app.MapPost(
+        "/employees/count",
+        async (HttpContext http, CountReadRequest request) =>
+        {
+            await Protect(http);
+            return await Reads(http).CountAsync(request, http.RequestAborted);
+        }
+    )
+    .RequireAuthorization();
+app.MapGet(
+        "/employees/{id:int}",
+        async (HttpContext http, int id) =>
+        {
+            var detail = await Reads(http)
+                .DetailAsync(
+                    new(JsonSerializer.SerializeToElement(new { Id = id })),
+                    http.RequestAborted
+                );
+            return detail.Record == null ? Results.NotFound() : Results.Json(detail);
+        }
+    )
+    .RequireAuthorization();
+app.MapPost(
+        "/employees/export",
+        async (HttpContext http, ExportReadRequest request) =>
+        {
+            await Protect(http);
+            http.Response.ContentType = "application/x-ndjson";
+            await foreach (var batch in Reads(http).ExportAsync(request, http.RequestAborted))
+            foreach (var row in batch.Records)
+                await http.Response.WriteAsync(row.GetRawText() + "\n", http.RequestAborted);
+        }
+    )
+    .RequireAuthorization();
+app.MapGet(
+        "/admin",
+        async (HttpContext http) =>
+        {
+            var admin = EmployeeConfiguration.Admin(http.User);
+            admin.Demand(admin.Scope);
+            var draft = await store.ReadDraftAsync(
+                admin,
+                admin.Scope,
+                "Employee",
+                http.RequestAborted
+            );
+            var history = await store.HistoryAsync(
+                admin,
+                admin.Scope,
+                "Employee",
+                http.RequestAborted
+            );
+            return Results.Content(
+                Designer.Render(
+                    EmployeeConfiguration.Schema.Metadata(admin, admin.Scope),
+                    draft,
+                    history,
+                    Token(http)
+                ),
+                "text/html"
+            );
+        }
+    )
+    .RequireAuthorization();
+app.MapPost(
+        "/admin/save",
+        async (HttpContext http) =>
+        {
+            await Protect(http);
+            var admin = EmployeeConfiguration.Admin(http.User);
+            admin.Demand(admin.Scope);
+            var form = await http.Request.ReadFormAsync();
+            var payload = form["payload"].ToString();
+            var policy = PolicyJson.Deserialize(payload);
+            var errors = new PolicyValidator<Employee>(
+                EmployeeConfiguration.Schema,
+                EmployeeConfiguration.Registry,
+                capabilities: Profiles(http)
+            ).Validate(policy);
+            if (errors.Count != 0)
+                throw new InvalidRequestException("Policy validation failed.", errors);
+            await store.SaveDraftAsync(
+                admin,
+                admin.Scope,
+                "Employee",
+                payload,
+                Revision(form, "draftRevision"),
+                http.RequestAborted
+            );
+            return Results.Redirect("/admin");
+        }
+    )
+    .RequireAuthorization();
+app.MapPost(
+        "/admin/publish",
+        async (HttpContext http) =>
+        {
+            await Protect(http);
+            var admin = EmployeeConfiguration.Admin(http.User);
+            var form = await http.Request.ReadFormAsync();
+            await store.PublishAsync(
+                admin,
+                admin.Scope,
+                EmployeeConfiguration.Schema,
+                EmployeeConfiguration.Registry,
+                Revision(form, "draftRevision"),
+                Revision(form, "activeRevision"),
+                cancellation: http.RequestAborted,
+                capabilities: Profiles(http)
+            );
+            return Results.Redirect("/admin");
+        }
+    )
+    .RequireAuthorization();
+app.MapPost(
+        "/admin/rollback",
+        async (HttpContext http) =>
+        {
+            await Protect(http);
+            var admin = EmployeeConfiguration.Admin(http.User);
+            var form = await http.Request.ReadFormAsync();
+            await store.RollbackAsync(
+                admin,
+                admin.Scope,
+                EmployeeConfiguration.Schema,
+                EmployeeConfiguration.Registry,
+                Revision(form, "version"),
+                Revision(form, "activeRevision"),
+                cancellation: http.RequestAborted,
+                capabilities: Profiles(http)
+            );
+            return Results.Redirect("/admin");
+        }
+    )
+    .RequireAuthorization();
+app.MapPost(
+        "/admin/preview",
+        async (HttpContext http) =>
+        {
+            await Protect(http);
+            var admin = EmployeeConfiguration.Admin(http.User);
+            admin.Demand(admin.Scope);
+            var form = await http.Request.ReadFormAsync();
+            var role = form["sampleRole"].ToString();
+            if (!new[] { "manager", "hr", "employee", "none" }.Contains(role))
+                return Results.BadRequest();
+            var tenant = (int)EmployeeConfiguration.Context(http.User).Values["tenant"]!;
+            var sample = new TrustedContext(
+                [role],
+                [],
+                new Dictionary<string, object?>
+                {
+                    { "tenant", tenant },
+                    { "user.id", tenant * 100 + 1 },
+                    { "user.departmentId", 10 },
+                }
+            );
+            var policy = PolicyJson.Deserialize(form["payload"].ToString());
+            new PolicyValidator<Employee>(
+                EmployeeConfiguration.Schema,
+                EmployeeConfiguration.Registry,
+                capabilities: Profiles(http)
+            ).DemandValid(policy);
+            var captured = new CapturedPolicy(
+                admin.Scope,
+                "Employee",
+                "1",
+                long.MaxValue,
+                PolicyJson.Serialize(policy)
+            );
+            // A fresh preview compiler avoids sharing synthetic content with published version caches.
+            var previewCompiler = new PolicyCompiler<Employee>(
+                EmployeeConfiguration.Schema,
+                EmployeeConfiguration.Registry,
+                EmployeeConfiguration.Mandatory,
+                capabilities: Profiles(http)
+            );
+            try
+            {
+                var bound = previewCompiler.Bind(captured, sample, admin.Scope);
+                var predicate = bound.Predicate.Compile();
+                return Results.Json(
+                    new
+                    {
+                        label = "Synthetic fixtures only",
+                        mandatory = "TenantId equals synthetic tenant",
+                        bound.ApplicableRules,
+                        fields = bound.Fields,
+                        records = EmployeeConfiguration
+                            .Fixtures(tenant)
+                            .Concat(EmployeeConfiguration.Fixtures(tenant == 1 ? 2 : 1))
+                            .Select(e => new
+                            {
+                                fixture = e.Id,
+                                allowed = predicate(e),
+                                matchedRules = policy
+                                    .Rules.Where(r =>
+                                        bound.ApplicableRules.Contains(r.Id)
+                                        && previewCompiler
+                                            .Predicate(r.Condition, sample)
+                                            .Compile()(e)
+                                    )
+                                    .Select(r => new { r.Id, r.Effect }),
+                            }),
+                    }
+                );
+            }
+            catch (AuthorizationException)
+            {
+                return Results.Json(
+                    new
+                    {
+                        label = "Synthetic fixtures only",
+                        denied = true,
+                        code = DataAccessErrorCode.AccessDenied,
+                    }
+                );
+            }
+        }
+    )
+    .RequireAuthorization();
+app.Run();
+
+public partial class Program { }

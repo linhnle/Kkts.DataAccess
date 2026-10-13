@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <PackageId>Kkts.DataAccess.Testing</PackageId>
+        <Version>0.1.0</Version>
+        <Description>Test-only, runner-neutral protected read adapter conformance checks. Not an adapter certification.</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+    </PropertyGroup>
+    <ItemGroup>
+        <ProjectReference Include="../Kkts.DataAccess/Kkts.DataAccess.csproj" />
+        <None Include="README.md" Pack="true" PackagePath="/" />
+    </ItemGroup>
+</Project>

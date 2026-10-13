@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <PackageId>Kkts.DataAccess</PackageId>
+        <Version>0.1.0</Version>
+        <Description>Schema-controlled data authorization integration.</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+    </PropertyGroup>
+    <ItemGroup>
+        <InternalsVisibleTo Include="Kkts.DataAccess.Tests" />
+        <None Include="../../README.md" Pack="true" PackagePath="/" />
+        <PackageReference Include="Kkts.Expressions" Version="3.1.0" />
+        <PackageReference Include="Kkts.Dynamic" Version="2.1.0" />
+    </ItemGroup>
+</Project>

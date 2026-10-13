@@ -55,3 +55,15 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Local dependency cache
+.packages/
+node_modules/
+
+# Example databases
+*.db
+*.db-shm
+*.db-wal
+
+# Host-managed example Data Protection keys
+examples/EmployeeApp/.cursor-keys/

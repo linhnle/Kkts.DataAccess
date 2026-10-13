@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <Version>0.1.0</Version>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+    </PropertyGroup>
+    <ItemGroup>
+        <None Include="README.md" Pack="true" PackagePath="/" />
+        <ProjectReference
+            Include="../Kkts.DataAccess/Kkts.DataAccess.csproj"
+            Condition="'$(UsePackedCore)' != 'true'"
+        />
+        <PackageReference
+            Include="Kkts.DataAccess"
+            Version="0.1.0"
+            Condition="'$(UsePackedCore)' == 'true'"
+        />
+        <PackageReference
+            Include="Microsoft.AspNetCore.DataProtection.Extensions"
+            Version="10.0.12"
+        />
+    </ItemGroup>
+</Project>

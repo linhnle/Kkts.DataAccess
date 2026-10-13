@@ -1,0 +1,43 @@
+name: Provider conformance
+on: [push, pull_request]
+jobs:
+  real-provider-tests:
+    runs-on: ubuntu-latest
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: Kda-local-Fixture-Only42
+        ports: ['1433:1433']
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: kda-local-fixture-only
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      KDA_SQLSERVER_TEST: Server=127.0.0.1,1433;User ID=sa;Password=Kda-local-Fixture-Only42;TrustServerCertificate=True
+      KDA_MYSQL_TEST: Server=127.0.0.1;Port=3306;User ID=root;Password=kda-local-fixture-only;SslMode=Required
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.401'
+      - name: Wait for SQL Server
+        run: |
+          for attempt in $(seq 1 60); do
+            if docker exec ${{ job.services.sqlserver.id }} /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Kda-local-Fixture-Only42 -C -Q 'SELECT 1'; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - run: dotnet restore Kkts.DataAccess.slnx --locked-mode
+      - run: dotnet build Kkts.DataAccess.slnx --no-restore
+      - run: dotnet test Kkts.DataAccess.slnx --no-build --logger trx
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: provider-test-results
+          path: '**/TestResults/*.trx'
