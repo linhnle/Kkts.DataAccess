@@ -1,10 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <Version>0.1.0</Version>
+        <Description>MySQL entity-read integration for Kkts.DataAccess using Entity Framework Core.</Description>
+        <PackageTags>data-access;authorization;mysql;entity-framework-core;efcore;protected-reads</PackageTags>
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
     <ItemGroup>
-        <None Include="../../docs/providers.md" Pack="true" PackagePath="README.md" />
+        <None Include="README.md" Pack="true" PackagePath="/" />
         <ProjectReference Include="../Kkts.DataAccess.EntityFrameworkCore/Kkts.DataAccess.EntityFrameworkCore.csproj" />
         <PackageReference Include="MySql.EntityFrameworkCore" Version="10.0.9" />
     </ItemGroup>

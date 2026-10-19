@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <Version>0.1.0</Version>
+        <Description>ASP.NET Core Data Protection integration for authenticated encryption of Kkts.DataAccess cursor continuation tokens.</Description>
+        <PackageTags>data-access;data-protection;cursor-pagination;continuation-tokens;authenticated-encryption</PackageTags>
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
     <ItemGroup>

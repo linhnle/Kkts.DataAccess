@@ -2,6 +2,25 @@
 
 .NET 10 record/field authorization integration using Kkts.Expressions 3.1.0 and Kkts.Dynamic 2.1.0. SQLite policy persistence and EF Core execution are separate from the core package.
 
+## Packages
+
+Install only the integrations you need; NuGet resolves their required packages
+transitively. Each package README contains installation, setup, and limitations.
+
+| Package | Role |
+| --- | --- |
+| [Kkts.DataAccess](src/Kkts.DataAccess/README.md) | Core schemas, policy compilation, and provider-neutral protected reads. |
+| [Kkts.DataAccess.EntityFrameworkCore](src/Kkts.DataAccess.EntityFrameworkCore/README.md) | Shared EF Core relational adapters, projection, and keyset traversal. |
+| [Kkts.DataAccess.Sqlite](src/Kkts.DataAccess.Sqlite/README.md) | SQLite policy persistence and SQLite entity reads. |
+| [Kkts.DataAccess.SqlServer](src/Kkts.DataAccess.SqlServer/README.md) | SQL Server entity reads; policy storage is separate. |
+| [Kkts.DataAccess.MySql](src/Kkts.DataAccess.MySql/README.md) | MySQL entity reads using Oracle's EF provider; policy storage is separate. |
+| [Kkts.DataAccess.DependencyInjection](src/Kkts.DataAccess.DependencyInjection/README.md) | Scoped/keyed registration and startup validation. |
+| [Kkts.DataAccess.AspNetCore](src/Kkts.DataAccess.AspNetCore/README.md) | Optional HTTP Problem Details translation. |
+| [Kkts.DataAccess.DataProtection](src/Kkts.DataAccess.DataProtection/README.md) | Optional encrypted cursor continuation tokens. |
+| [Kkts.DataAccess.Testing](src/Kkts.DataAccess.Testing/README.md) | Test-only, runner-neutral adapter conformance checks, not certification. |
+
+## Solution walkthrough
+
 Adapter extension authors can use the optional, **test-only**
 [Kkts.DataAccess.Testing kit](src/Kkts.DataAccess.Testing/README.md) from any runner.
 It exercises protected repository behavior, owned cleanup and declared
