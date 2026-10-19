@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <PackageId>Kkts.DataAccess</PackageId>
-        <Version>0.1.0</Version>
         <Description>Schema-controlled record- and field-level authorization for .NET data access, with provider-neutral protected read contracts.</Description>
         <PackageTags>data-access;authorization;access-control;row-level-security;field-level-security;policy;dotnet</PackageTags>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>

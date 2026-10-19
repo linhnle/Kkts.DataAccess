@@ -1,6 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
-        <Version>0.1.0</Version>
         <Description>SQL Server entity-read integration for Kkts.DataAccess using Entity Framework Core.</Description>
         <PackageTags>data-access;authorization;sqlserver;entity-framework-core;efcore;protected-reads</PackageTags>
         <PackageReadmeFile>README.md</PackageReadmeFile>

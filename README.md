@@ -140,16 +140,59 @@ Explicit compatibility may materialize hidden entity data. Provider failures
 abort without unrestricted/local/entity-loading retries. Stable ordering and
 projection alone do not provide a data snapshot across batches.
 
-Package consumption check:
+## Building NuGet packages
+
+The release version for all nine NuGet libraries is defined once in
+[Directory.Build.props](Directory.Build.props). Change its `Version` value to
+update every package and the optional packed-core references. Third-party
+dependency versions are separate and remain in their project files.
+
+From the repository root, restore, build in Release mode, and pack all libraries:
 
 ```sh
-dotnet pack src/Kkts.DataAccess/Kkts.DataAccess.csproj -o artifacts/packages
+dotnet pack Kkts.DataAccess.slnx --configuration Release -p:RestoreLockedMode=true
+python3 scripts/verify_packages.py artifacts/packages 0.1.0
+```
+
+Use the shared version as the verifier's final argument after changing it.
+All nine `.nupkg` files are written to the root `artifacts/packages/` directory,
+which is ignored by Git. This includes `Kkts.DataAccess.Testing`, but excludes
+the unit-test project and all examples. Packing does not run tests or publish
+packages. Individual project packing uses the same default output directory.
+
+For a temporary release version without editing the shared default, use
+`-p:Version` (not a `PackageVersion`-only override, which would leave explicit
+packed-core references on the default version):
+
+```sh
+dotnet pack Kkts.DataAccess.slnx --configuration Release -p:RestoreLockedMode=true -p:Version=0.1.1-localcheck -p:PackageOutputPath="$PWD/artifacts/localcheck"
+python3 scripts/verify_packages.py artifacts/localcheck 0.1.1-localcheck
+```
+
+The output directory is not automatically cleaned. Use an empty output directory
+for release verification: old versions or partial outputs from a failed command
+are not a successful release. The verifier requires exactly nine packages and
+checks their identities, versions, internal dependency versions, .NET 10
+assemblies, and READMEs. Run its regression checks with
+`python3 -m unittest discover -s scripts -p 'test_verify_packages.py'`.
+
+### Packed-core consumption check
+
+After the default complete package build above:
+
+```sh
 dotnet restore examples/EmployeeApp/EmployeeApp.csproj -p:UsePackedCore=true -p:RestoreAdditionalProjectSources="$PWD/artifacts/packages" --force-evaluate
 dotnet build examples/EmployeeApp/EmployeeApp.csproj -p:UsePackedCore=true --no-restore
 dotnet restore Kkts.DataAccess.slnx --force-evaluate
 ```
 
-UsePackedCore switches the adapter to the packed core dependency. Neither upstream library is modified.
+`UsePackedCore` switches participating integrations to the packed core dependency.
+For a temporary release, pass the same `-p:Version=...` to both consumption
+commands and point the local source at that release's output directory. Use an
+isolated cache via `-p:RestorePackagesPath=...` on both commands to avoid reusing
+an older package with the same version. Mode-specific restores can change lock
+files; the final normal restore returns them to project-reference mode. Neither
+upstream library is modified.
 
 ## Formatting
 

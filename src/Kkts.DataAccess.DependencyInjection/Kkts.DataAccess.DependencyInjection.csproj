@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <PackageId>Kkts.DataAccess.DependencyInjection</PackageId>
-        <Version>0.1.0</Version>
         <Description>Dependency injection registration, scoped resource management, and startup validation for Kkts.DataAccess protected reads.</Description>
         <PackageTags>data-access;authorization;dependency-injection;di;hosting;startup-validation</PackageTags>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>

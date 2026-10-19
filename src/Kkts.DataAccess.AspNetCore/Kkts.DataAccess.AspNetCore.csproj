@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <PackageId>Kkts.DataAccess.AspNetCore</PackageId>
-        <Version>0.1.0</Version>
         <Description>ASP.NET Core Problem Details translation for Kkts.DataAccess authorization and read errors.</Description>
         <PackageTags>data-access;authorization;aspnetcore;problem-details;http;error-handling</PackageTags>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
