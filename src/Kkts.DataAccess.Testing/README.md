@@ -5,6 +5,24 @@ Reference this package only from tests or test tools, never production hosts.
 The package depends only on core (including core's existing transitive packages);
 it has no runner, EF, database driver, DI, ASP.NET, or friend-access dependency.
 
+## When to use
+
+Use this package when implementing a custom protected read adapter or maintaining
+provider regression fixtures. Application hosts do not need it. Passing checks
+does not certify an adapter or prove database enforcement.
+
+## Requirements and installation
+
+Targets .NET 10. NuGet installs core and its dependencies transitively.
+Choose your own test runner and any driver/provider packages your fixture needs;
+they are not supplied by this kit.
+
+```sh
+dotnet add package Kkts.DataAccess.Testing
+```
+
+## Fixture setup and responsibilities
+
 Fixtures bind their own entity's direct scalar properties with
 `ConformanceBindings<T>`. No production entity type or internal plan constructor
 is required. Implement `IAdapterConformanceFixture<T>` and seed the supplied
@@ -33,15 +51,34 @@ payloads, token values, or exception messages. Passing fixtures is evidence for
 executed cases, **not certification** that an adapter is safe for arbitrary
 policies, models, data or collations.
 
-## Running checks
+## Quick start
+
+This runner-neutral helper takes an application-defined fixture factory for
+your entity type. Implement `IAdapterConformanceFixture<TEntity>` with real
+isolated setup, adapter bindings, observations, mutations, and cleanup before
+calling it. It is not a complete fixture implementation.
 
 ```csharp
-var report = await new AdapterConformanceSuite<MyEntity>().RunAsync(
-    () => new MyIsolatedFixture(), cancellation: cancellation);
-// Adapt to any runner's assertion API:
-if (!report.Passed)
-    throw new Exception("Inspect the structured conformance results.");
+using Kkts.DataAccess.Testing;
+
+public static class AdapterChecks
+{
+    public static async Task VerifyAsync<TEntity>(
+        Func<IAdapterConformanceFixture<TEntity>> fixtureFactory,
+        CancellationToken cancellation)
+        where TEntity : class
+    {
+        var report = await new AdapterConformanceSuite<TEntity>().RunAsync(
+            fixtureFactory, cancellation: cancellation);
+        if (!report.Passed)
+            throw new InvalidOperationException("Inspect the structured conformance results.");
+    }
+}
 ```
+
+Adapt failure reporting to your runner's assertion API as needed.
+
+## Behavior and limitations
 
 An optional scenario-ID selection runs focused checks. Unselected scenarios
 remain explicitly `NotRun`, so a partial selection cannot claim an overall
@@ -79,3 +116,10 @@ The repository's `examples/AdapterConformance` console uses the public kit with
 `CustomReadAdapter`. It has no xUnit dependency. Its output checks pass while
 database evidence remains `NotRun` and overall `Passed` is false. A zero process
 exit means the sample produced its expected honest report, not certification.
+
+## Related packages and documentation
+
+- [Core adapter contracts](https://github.com/linhnle/Kkts.DataAccess/blob/main/docs/repositories.md).
+- [Runner-neutral sample fixture](https://github.com/linhnle/Kkts.DataAccess/tree/main/examples/AdapterConformance).
+- [Provider evidence](https://github.com/linhnle/Kkts.DataAccess/blob/main/docs/providers.md)
+  and [recorded acceptance results](https://github.com/linhnle/Kkts.DataAccess/blob/main/docs/repository-acceptance.md).

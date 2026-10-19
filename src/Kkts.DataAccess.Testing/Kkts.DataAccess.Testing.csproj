@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <PackageId>Kkts.DataAccess.Testing</PackageId>
-        <Version>0.1.0</Version>
-        <Description>Test-only, runner-neutral protected read adapter conformance checks. Not an adapter certification.</Description>
+        <Description>Test-only, runner-neutral conformance checks for Kkts.DataAccess protected read adapters. Passing checks does not constitute adapter certification.</Description>
+        <PackageTags>data-access;authorization;testing;conformance;adapters;test-utilities</PackageTags>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>

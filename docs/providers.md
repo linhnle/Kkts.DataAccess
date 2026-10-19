@@ -245,6 +245,11 @@ docker compose -f scripts/provider-databases.compose.yml down
 
 Wait for servers to be ready before tests. Tests create unique entity databases and delete them, with independent temporary SQLite policy files. Never point tests at a production server. SQL Server requires an x64-compatible Docker runtime or remote server; on Apple Silicon the real server can run under Docker's amd64 emulation. The test still executes real SQL Server queries, not an in-memory substitute.
 
+Fixture setup and database deletion both use asynchronous database operations,
+avoiding blocking connection opens during parallel test cleanup. Cleanup errors
+still fail the test; temporary SQLite files are removed even if database deletion
+fails.
+
 Without server connections run `dotnet test --filter 'Provider!=SqlServer&Provider!=MySql'`. This excludes remote-provider acceptance and must be reported as not run. An unfiltered run without configured connections fails explicitly. The CI workflow runs all providers without that filter; repository owners can require its check in branch protection.
 
 ### Saved local connections

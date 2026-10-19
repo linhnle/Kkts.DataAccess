@@ -930,14 +930,19 @@ public partial class ReadTests : IAsyncLifetime
         );
     }
 
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
         SqliteConnection.ClearAllPools();
-        using (var db = new Database(Options))
-            db.Database.EnsureDeleted();
-        File.Delete(path);
-        File.Delete(policyPath);
-        return Task.CompletedTask;
+        try
+        {
+            await using var db = new Database(Options);
+            await db.Database.EnsureDeletedAsync();
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(policyPath);
+        }
     }
 
     [Fact]

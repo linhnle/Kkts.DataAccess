@@ -1,17 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
-        <Version>0.1.0</Version>
+        <Description>Shared Entity Framework Core relational adapters for Kkts.DataAccess protected reads, scalar projection, and keyset traversal.</Description>
+        <PackageTags>data-access;authorization;entity-framework-core;efcore;relational;projection;keyset-pagination</PackageTags>
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
     <ItemGroup>
-        <None Include="../../docs/providers.md" Pack="true" PackagePath="README.md" />
+        <None Include="README.md" Pack="true" PackagePath="/" />
         <ProjectReference
             Include="../Kkts.DataAccess/Kkts.DataAccess.csproj"
             Condition="'$(UsePackedCore)' != 'true'"
         />
         <PackageReference
             Include="Kkts.DataAccess"
-            Version="0.1.0"
+            Version="$(Version)"
             Condition="'$(UsePackedCore)' == 'true'"
         />
         <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" />

@@ -609,7 +609,7 @@
       "adapterconformance": {
         "type": "Project",
         "dependencies": {
-          "CustomReadAdapter": "[1.0.0, )",
+          "CustomReadAdapter": "[0.1.0, )",
           "Kkts.DataAccess.DataProtection": "[0.1.0, )",
           "Kkts.DataAccess.Testing": "[0.1.0, )"
         }
